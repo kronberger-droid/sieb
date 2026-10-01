@@ -144,6 +144,15 @@ compositor live in a folder named after it.
   niri and sway; the rest works anywhere. `power.toml` is the theme.
 - [`niri/`](examples/niri) needs niri.
   - `window.nu` focuses a window, as a fourth launcher mode.
+- [`stream/`](examples/stream) pipes large, slow input into plain sieb,
+  which is usable from the first line while the counter climbs. Run
+  them from a terminal.
+  - `find.nu [DIR]` lists every file under `DIR` (default `~`) with
+    `fd` and opens the pick with `xdg-open`.
+  - `grep.nu [DIR]` lists every line of a project with `rg` and opens
+    the pick in helix at that line. Nushell's repository is 440k lines.
+  - Both take `--config` for a theme and `--print` to print the pick
+    instead of opening it.
 - [`config.toml`](examples/config.toml) lists every config key with its
   default.
 
