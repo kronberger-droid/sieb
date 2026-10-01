@@ -264,6 +264,7 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
         notify: wake.notify.clone(),
         wheel: Wheel::default(),
         hovered: None,
+        pointer_at: None,
         pressed: None,
         options,
         matcher,
@@ -335,6 +336,8 @@ struct App {
     wheel: Wheel,
     /// Visible row under the pointer, to act only when it changes.
     hovered: Option<usize>,
+    /// Last pointer position on the panel.
+    pointer_at: Option<(f64, f64)>,
     /// Visible row a left press started on.
     pressed: Option<usize>,
     text: Text,
@@ -891,6 +894,7 @@ impl PointerHandler for App {
                     if let Some(device) = &self.shape_device {
                         device.set_shape(serial, Shape::Default);
                     }
+                    self.pointer_at = Some(event.position);
                 }
                 // A release always arrives on the surface that got the press
                 // (implicit grab), so a release on the backdrop means the
@@ -905,6 +909,12 @@ impl PointerHandler for App {
                 // pointer also sends a position, and acting on that would
                 // silently override the keyboard selection.
                 PointerEventKind::Motion { .. } => {
+                    // Some compositors send a motion along with the enter of
+                    // a surface mapping under a resting pointer. Only a
+                    // position that actually changed counts as hovering.
+                    if self.pointer_at.replace(event.position) == Some(event.position) {
+                        continue;
+                    }
                     let row = self.options.layout.row_at(event.position.1);
                     if row != self.hovered {
                         self.hovered = row;
