@@ -90,22 +90,38 @@ def command [entry: record] {
     | str trim
 }
 
+# The words that run a command in a terminal. Terminals disagree on this:
+# foot and kitty take the command as plain arguments, wezterm wants
+# `start --`, most others `-e`.
 def terminal [] {
-    if ($env.TERMINAL? | is-not-empty) {
-        return $env.TERMINAL
+    let term = if ($env.TERMINAL? | is-not-empty) {
+        $env.TERMINAL
+    } else {
+        [xdg-terminal-exec foot kitty alacritty wezterm ghostty rio]
+        | where {|term| which $term | is-not-empty }
+        | get 0?
+        | default xterm
     }
-    [foot kitty alacritty wezterm ghostty]
-    | where {|term| which $term | is-not-empty }
-    | get 0?
-    | default xterm
+    match ($term | path basename) {
+        "xdg-terminal-exec" | "foot" | "kitty" => [$term]
+        "wezterm" => [$term start --]
+        _ => [$term -e]
+    }
+}
+
+# The argument list that runs `entry`, wrapped in a terminal if it asks.
+def argv [entry: record] {
+    let shell = [sh -c (command $entry)]
+    if $entry.Terminal? == "true" { [...(terminal) ...$shell] } else { $shell }
 }
 
 # Detached from sieb: its own session, and stdout closed so sieb sees the
 # script finish and closes right away.
-def launch [command: string, dir?: string] {
-    let dir = $dir | default $env.HOME
+def launch [argv: list<string>, dir?: string] {
+    # A stale `Path=` should not stop the app from starting.
+    let dir = if ($dir | is-not-empty) and ($dir | path exists) { $dir } else { $env.HOME }
     cd $dir
-    ^setsid -f sh -c $command o+e> /dev/null
+    ^setsid -f ...$argv o+e> /dev/null
 }
 
 def main [choice?: string] {
@@ -113,15 +129,9 @@ def main [choice?: string] {
         "0" => { menu }
         "1" => {
             let entry = parse-entry $env.ROFI_INFO
-            let command = command $entry
-            let command = if $entry.Terminal? == "true" {
-                $"(terminal) -e sh -c '($command | str replace --all "'" "'\\''")'"
-            } else {
-                $command
-            }
-            launch $command $entry.Path?
+            launch (argv $entry) $entry.Path?
         }
         # Typed text that is not an app: run it.
-        "2" => { launch $choice }
+        "2" => { launch [sh -c $choice] }
     }
 }
