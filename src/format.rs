@@ -135,8 +135,19 @@ pub fn parse_rofi(line: &str) -> Line {
     Line::Row(row)
 }
 
-/// An object with `text` is a row; one without sets menu options; a bare
-/// string or number is a row of just that.
+/// Keys of an object that sets menu options instead of being a row.
+const MENU_OPTIONS: &[&str] = &[
+    "sieb",
+    "prompt",
+    "message",
+    "no-custom",
+    "keep-filter",
+    "data",
+    "new-selection",
+];
+
+/// An object with `text` is a row; one made of option keys sets menu
+/// options; a bare string or number is a row of just that.
 fn from_value(value: Value) -> Vec<Line> {
     let mut object = match value {
         Value::Object(object) => object,
@@ -151,15 +162,22 @@ fn from_value(value: Value) -> Vec<Line> {
             return vec![Line::Row(row)];
         }
     };
-    let Some(text) = object.get("text") else {
+    // Only an object made of nothing but option keys sets options. Any other
+    // object is a row, or `ls | to json` would vanish into ignored options.
+    if !object.contains_key("text") && object.keys().all(|key| MENU_OPTIONS.contains(&key.as_str())) {
         object.remove("sieb");
         return object
             .into_iter()
             .map(|(key, value)| Line::Mode(key, as_string(value)))
             .collect();
+    }
+    let text = match object.get("text") {
+        Some(text) => as_string(text.clone()),
+        // Shown whole until there is a way to name the display field.
+        None => Value::Object(object.clone()).to_string(),
     };
     let row = Row {
-        text: as_string(text.clone()),
+        text,
         info: object.get("info").cloned().map(as_string),
         meta: object.get("meta").cloned().map(as_string),
         selectable: object.get("selectable") != Some(&Value::Bool(false)),
@@ -246,6 +264,17 @@ not json
         assert!(matches!(&lines[3], Line::Row(r) if r.text == "plain" && r.raw.as_deref() == Some("\"plain\"")));
         assert_eq!(lines[4], row("not json"));
         assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn records_without_text_stay_rows() {
+        // `ls | to json -r`, unrenamed.
+        let lines = all(r#"[{"name":"a.rs","type":"file","size":10}]"#, Format::Json);
+        assert!(matches!(&lines[..], [Line::Row(r)]
+            if r.text == r#"{"name":"a.rs","type":"file","size":10}"#
+            && r.raw.as_deref() == Some(r.text.as_str())));
+        // An unknown key next to option keys makes it a row too.
+        assert!(matches!(&all(r#"{"prompt":"p","name":"x"}"#, Format::Json)[..], [Line::Row(_)]));
     }
 
     #[test]
