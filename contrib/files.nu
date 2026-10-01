@@ -44,6 +44,15 @@ def main [choice?: string] {
     match ($env.ROFI_RETV? | default "0") {
         "0" => { list $here }
         "1" => { visit $env.ROFI_INFO }
-        _ => { visit ($here | path join ($choice | path expand --no-symlink)) }
+        # Absolute and home paths as they are, the rest under the directory
+        # on screen, not sieb's working directory.
+        _ => {
+            let target = if ($choice | str starts-with "/") or ($choice | str starts-with "~") {
+                $choice | path expand
+            } else {
+                $here | path join $choice | path expand
+            }
+            visit $target
+        }
     }
 }
