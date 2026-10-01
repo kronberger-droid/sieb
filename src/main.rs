@@ -1,3 +1,4 @@
+mod config;
 mod layout;
 mod matcher;
 mod picker;
@@ -6,6 +7,7 @@ mod text;
 mod window;
 
 use std::io::{self, BufReader, BufWriter, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -29,21 +31,20 @@ struct Cli {
     #[arg(short = 'i', long)]
     insensitive: bool,
 
-    /// Number of visible lines
-    #[arg(short, long, default_value_t = 10)]
-    lines: u32,
-
     /// Print the index of the selection instead of its text
     #[arg(long)]
     index: bool,
 
-    /// Font family, resolved through fontconfig
-    #[arg(long, default_value = "sans-serif")]
-    font: String,
-
     /// Print all matches for QUERY without opening a window
     #[arg(short, long, value_name = "QUERY")]
     filter: Option<String>,
+
+    /// Config file [default: $XDG_CONFIG_HOME/sieb/config.toml]
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    #[command(flatten)]
+    appearance: config::Appearance,
 }
 
 fn main() -> ExitCode {
@@ -62,6 +63,14 @@ fn main() -> ExitCode {
 }
 
 fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
+    // Read before anything else, so a broken config fails fast instead of
+    // after the window is up.
+    let file = match config::load(cli.config.as_deref()) {
+        Ok(file) => file,
+        Err(err) => return fail(err),
+    };
+    let (font, layout, theme) = cli.appearance.over(file).resolve();
+
     let (wake, notify) = match window::wake() {
         Ok(pair) => pair,
         Err(err) => return fail(err),
@@ -74,9 +83,9 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
     let options = window::Options {
         prompt: cli.prompt,
         index: cli.index,
-        font: cli.font,
-        layout: layout::Layout::new(640, cli.lines, 15.0, 10.0),
-        theme: render::Theme::default(),
+        font,
+        layout,
+        theme,
     };
     match window::run(options, matcher, wake) {
         Ok(window::Outcome::Accept(line)) => {
