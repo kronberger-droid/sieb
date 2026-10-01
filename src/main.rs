@@ -3,6 +3,7 @@ mod layout;
 mod matcher;
 mod picker;
 mod render;
+mod script;
 mod text;
 mod window;
 
@@ -38,6 +39,11 @@ struct Cli {
     /// Print all matches for QUERY without opening a window
     #[arg(short, long, value_name = "QUERY")]
     filter: Option<String>,
+
+    /// Build the menus with SCRIPT instead of reading stdin, using rofi's
+    /// script protocol
+    #[arg(short, long, value_name = "SCRIPT", conflicts_with = "filter")]
+    script: Option<PathBuf>,
 
     /// Config file [default: $XDG_CONFIG_HOME/sieb/config.toml]
     #[arg(long, value_name = "PATH")]
@@ -75,25 +81,35 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
         Ok(pair) => pair,
         Err(err) => return fail(err),
     };
-    let matcher = Matcher::new(case, notify);
-    // Started before the window, so input streams in while it maps. Read
-    // errors just end the list; there is no one to report them to mid-pick.
-    let _ = matcher::spawn_reader(BufReader::new(io::stdin()), matcher.injector());
+    let input = match cli.script {
+        Some(path) => window::Input::Script(path),
+        None => {
+            let matcher = Matcher::new(case, notify);
+            // Started before the window, so input streams in while it maps.
+            // Read errors just end the list; there is no one to report them
+            // to mid-pick.
+            let _ = matcher::spawn_reader(BufReader::new(io::stdin()), matcher.injector());
+            window::Input::Lines(matcher)
+        }
+    };
 
     let options = window::Options {
         prompt: cli.prompt,
+        case,
         index: cli.index,
         font,
         layout,
         theme,
     };
-    match window::run(options, matcher, wake) {
+    match window::run(options, input, wake) {
         Ok(window::Outcome::Accept(line)) => {
             let mut out = io::stdout().lock();
             let _ = writeln!(out, "{line}");
             ExitCode::SUCCESS
         }
         Ok(window::Outcome::Cancel) => ExitCode::FAILURE,
+        Ok(window::Outcome::Quit) => ExitCode::SUCCESS,
+        Ok(window::Outcome::Failed(err)) => fail(err),
         Err(err) => fail(err),
     }
 }

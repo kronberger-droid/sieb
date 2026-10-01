@@ -10,6 +10,26 @@ use nucleo::{Config, Injector, Nucleo, Status};
 pub struct Entry {
     pub index: u32,
     pub text: String,
+    /// Script mode: handed back to the script when this entry is picked.
+    pub info: Option<String>,
+    pub selectable: bool,
+}
+
+/// Adds a row to the matcher. `meta` is matched but not shown, so it goes
+/// into the haystack after the text, where highlight indices past the
+/// visible text simply fall off the end.
+pub fn push(injector: &Injector<Entry>, index: u32, row: crate::script::Row) {
+    let haystack = match &row.meta {
+        Some(meta) => format!("{} {meta}", row.text),
+        None => row.text.clone(),
+    };
+    let entry = Entry {
+        index,
+        text: row.text,
+        info: row.info,
+        selectable: row.selectable,
+    };
+    injector.push(entry, |_, columns| columns[0] = haystack.as_str().into());
 }
 
 pub struct Matcher {
@@ -125,13 +145,12 @@ where
             }
             let line = buf.strip_suffix(b"\n").unwrap_or(&buf);
             let line = line.strip_suffix(b"\r").unwrap_or(line);
-            let entry = Entry {
-                index,
+            let row = crate::script::Row {
                 text: String::from_utf8_lossy(line).into_owned(),
+                selectable: true,
+                ..Default::default()
             };
-            injector.push(entry, |entry, columns| {
-                columns[0] = entry.text.as_str().into();
-            });
+            push(&injector, index, row);
             index += 1;
         }
     })

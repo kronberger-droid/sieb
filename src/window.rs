@@ -3,6 +3,7 @@
 
 use std::error::Error;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use smithay_client_toolkit::{
     output::{OutputHandler, OutputState},
     reexports::{
         calloop::{
-            EventLoop, LoopHandle,
+            EventLoop, LoopHandle, channel,
             ping::{PingSource, make_ping},
         },
         calloop_wayland_source::WaylandSource,
@@ -58,17 +59,29 @@ use smithay_client_toolkit::{
 };
 
 use crate::matcher::Matcher;
+use crate::script::{self, Call, Retv};
 use crate::picker::{Accept, Picker, Wheel};
 use crate::layout::Layout;
+use nucleo::pattern::CaseMatching;
+use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use crate::render::{self, Theme, View};
 use crate::text::Text;
 
 pub struct Options {
     pub prompt: Option<String>,
+    pub case: CaseMatching,
     pub index: bool,
     pub font: String,
     pub layout: Layout,
     pub theme: Theme,
+}
+
+/// What fills the list.
+pub enum Input {
+    /// dmenu mode: a matcher already fed from stdin.
+    Lines(Matcher),
+    /// Script mode: run this script for each menu.
+    Script(PathBuf),
 }
 
 /// How the window was closed.
@@ -76,12 +89,60 @@ pub enum Outcome {
     Cancel,
     /// Print this and exit 0.
     Accept(String),
+    /// Exit 0 without printing: a script finished its action.
+    Quit,
+    Failed(String),
+}
+
+/// Options a script sets for its menu with `\0key\x1fvalue` lines.
+#[derive(Default)]
+struct Menu {
+    prompt: Option<String>,
+    /// Typed text that matches nothing cannot be submitted.
+    no_custom: bool,
+    /// Keep the query when this menu replaces the previous one.
+    keep_filter: bool,
+    /// Handed to the next call as `ROFI_DATA`.
+    data: Option<String>,
+}
+
+impl Menu {
+    fn set(&mut self, key: &str, value: String) {
+        match key {
+            "prompt" => self.prompt = Some(value),
+            "no-custom" => self.no_custom = value == "true",
+            "keep-filter" => self.keep_filter = value == "true",
+            "data" => self.data = Some(value),
+            // message, markup-rows, urgent, active, use-hot-keys,
+            // keep-selection, new-selection, delim, theme: not yet.
+            _ => {}
+        }
+    }
+}
+
+/// A call whose menu is not shown yet. The current menu stays up until its
+/// first row arrives, so a script that acts and prints nothing closes sieb
+/// without an empty frame in between.
+struct Pending {
+    id: u32,
+    matcher: Matcher,
+    menu: Menu,
+}
+
+struct ScriptState {
+    path: PathBuf,
+    events: Sender<script::Event>,
+    next_id: u32,
+    /// The call whose menu is on screen.
+    visible: Option<u32>,
+    pending: Option<Pending>,
 }
 
 /// Wakes the event loop when the matcher has new results.
 pub struct Wake {
     pending: Arc<AtomicBool>,
     source: PingSource,
+    notify: Arc<dyn Fn() + Send + Sync>,
 }
 
 /// The notify callback for [`Matcher::new`] and the event source it wakes.
@@ -93,15 +154,49 @@ pub fn wake() -> io::Result<(Wake, Arc<dyn Fn() + Send + Sync>)> {
     let (ping, source) = make_ping()?;
     let pending = Arc::new(AtomicBool::new(false));
     let flag = pending.clone();
-    let notify = Arc::new(move || {
+    let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if !flag.swap(true, Ordering::AcqRel) {
             ping.ping();
         }
     });
-    Ok((Wake { pending, source }, notify))
+    let wake = Wake {
+        pending,
+        source,
+        notify: notify.clone(),
+    };
+    Ok((wake, notify))
 }
 
-pub fn run(options: Options, matcher: Matcher, wake: Wake) -> Result<Outcome, Box<dyn Error>> {
+pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dyn Error>> {
+    // The first script call starts before anything else, so it runs while
+    // fonts load and the window maps.
+    let (events, event_channel) = channel::channel();
+    let mut script = None;
+    let matcher = match input {
+        Input::Lines(matcher) => matcher,
+        Input::Script(path) => {
+            let mut state = ScriptState {
+                path,
+                events,
+                next_id: 0,
+                visible: None,
+                pending: None,
+            };
+            let call = Call {
+                retv: Retv::Initial,
+                arg: None,
+                query: "",
+                info: None,
+                data: None,
+            };
+            state
+                .start(call, options.case, &wake.notify)
+                .map_err(|err| format!("{}: {err}", state.path.display()))?;
+            script = Some(state);
+            // Shown until the first menu arrives.
+            Matcher::new(options.case, wake.notify.clone())
+        }
+    };
     let text = Text::load(&options.font)?;
 
     let conn = Connection::connect_to_env()?;
@@ -164,6 +259,9 @@ pub fn run(options: Options, matcher: Matcher, wake: Wake) -> Result<Outcome, Bo
         fractional,
 
         picker: Picker::new(options.layout.lines),
+        script,
+        menu: Menu::default(),
+        notify: wake.notify.clone(),
         wheel: Wheel::default(),
         hovered: None,
         pressed: None,
@@ -190,6 +288,14 @@ pub fn run(options: Options, matcher: Matcher, wake: Wake) -> Result<Outcome, Bo
             // again instead of getting lost.
             pending.store(false, Ordering::Release);
             app.refresh();
+        })
+        .map_err(|err| err.error)?;
+    event_loop
+        .handle()
+        .insert_source(event_channel, |event, _, app: &mut App| {
+            if let channel::Event::Msg(event) = event {
+                app.script_event(event);
+            }
         })
         .map_err(|err| err.error)?;
     WaylandSource::new(conn, event_queue).insert(event_loop.handle())?;
@@ -222,6 +328,10 @@ struct App {
     options: Options,
     matcher: Matcher,
     picker: Picker,
+    script: Option<ScriptState>,
+    /// Options of the script menu on screen.
+    menu: Menu,
+    notify: Arc<dyn Fn() + Send + Sync>,
     wheel: Wheel,
     /// Visible row under the pointer, to act only when it changes.
     hovered: Option<usize>,
@@ -287,7 +397,7 @@ impl App {
                 let count = self.matcher.counts().0;
                 self.picker.clamp(count);
                 let accept = self.picker.accept(count, self.modifiers.shift);
-                self.outcome = Some(Outcome::Accept(self.output(accept)));
+                self.accept(accept);
             }
             Keysym::Up | Keysym::KP_Up | Keysym::ISO_Left_Tab => self.move_by(-1, count),
             Keysym::Down | Keysym::KP_Down | Keysym::Tab => self.move_by(1, count),
@@ -325,7 +435,88 @@ impl App {
     fn accept_rank(&mut self, rank: u32) {
         // The rank is what the user sees, so no settling: it comes from the
         // snapshot that was drawn.
-        self.outcome = Some(Outcome::Accept(self.output(Accept::Match(rank))));
+        self.accept(Accept::Match(rank));
+    }
+
+    /// Enter or a click: print and exit in dmenu mode, call the script in
+    /// script mode.
+    fn accept(&mut self, accept: Accept) {
+        let Some(script) = &mut self.script else {
+            self.outcome = Some(Outcome::Accept(self.output(accept)));
+            return;
+        };
+        // One call at a time: a second Enter while the script works is
+        // dropped rather than queued against a menu that is about to go.
+        if script.pending.is_some() {
+            return;
+        }
+        let query = self.picker.query();
+        let (retv, arg, info) = match accept {
+            Accept::Match(rank) => match self.matcher.get(rank) {
+                Some(entry) if entry.selectable => {
+                    (Retv::Entry, entry.text.as_str(), entry.info.as_deref())
+                }
+                _ => return,
+            },
+            Accept::Query if self.menu.no_custom => return,
+            Accept::Query => (Retv::Custom, query, None),
+        };
+        let call = Call {
+            retv,
+            arg: Some(arg),
+            query,
+            info,
+            data: self.menu.data.as_deref(),
+        };
+        if let Err(err) = script.start(call, self.options.case, &self.notify) {
+            self.outcome = Some(Outcome::Failed(format!("{}: {err}", script.path.display())));
+        }
+    }
+
+    fn script_event(&mut self, event: script::Event) {
+        let Some(script) = &mut self.script else {
+            return;
+        };
+        match event {
+            script::Event::Mode { call, key, value } => {
+                if let Some(pending) = script.pending.as_mut().filter(|p| p.id == call) {
+                    pending.menu.set(&key, value);
+                } else if script.visible == Some(call) {
+                    self.menu.set(&key, value);
+                    self.redraw();
+                }
+            }
+            script::Event::FirstRow { call } => {
+                let Some(pending) = script.pending.take_if(|p| p.id == call) else {
+                    return;
+                };
+                script.visible = Some(call);
+                self.matcher = pending.matcher;
+                self.menu = pending.menu;
+                if !self.menu.keep_filter {
+                    self.picker.clear();
+                }
+                self.picker.clamp(0);
+                self.matcher.set_query(self.picker.query());
+                self.refresh();
+                self.redraw();
+            }
+            script::Event::Done { call, status, rows } => {
+                if script.pending.as_ref().is_some_and(|p| p.id == call) {
+                    // Rows would have shown the menu already, so this call
+                    // printed nothing: the script is done.
+                    debug_assert_eq!(rows, 0);
+                    script.pending = None;
+                    self.outcome = Some(if status.success() {
+                        Outcome::Quit
+                    } else {
+                        Outcome::Failed(format!("{} exited with {status}", script.path.display()))
+                    });
+                } else if !status.success() {
+                    eprintln!("sieb: {} exited with {status}", script.path.display());
+                }
+            }
+        }
     }
 
     fn move_by(&mut self, delta: i64, count: u32) {
@@ -378,7 +569,7 @@ impl App {
         let selected = (matched > 0).then(|| (self.picker.selected() - scroll) as usize);
         let rows = self.matcher.window(scroll, self.picker.lines());
         let view = View {
-            prompt: self.options.prompt.as_deref(),
+            prompt: self.menu.prompt.as_deref().or(self.options.prompt.as_deref()),
             query: self.picker.query(),
             rows: rows
                 .into_iter()
@@ -435,6 +626,28 @@ impl App {
         // The panel is a synced subsurface, so its commit above only becomes
         // visible here, together with the backdrop. No half-drawn first frame.
         self.layer.commit();
+    }
+}
+
+impl ScriptState {
+    /// Starts the next call. Its rows go into a fresh matcher that replaces
+    /// the visible one once the first row arrives.
+    fn start(
+        &mut self,
+        call: Call,
+        case: CaseMatching,
+        notify: &Arc<dyn Fn() + Send + Sync>,
+    ) -> io::Result<()> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let matcher = Matcher::new(case, notify.clone());
+        script::spawn(&self.path, call, id, matcher.injector(), self.events.clone())?;
+        self.pending = Some(Pending {
+            id,
+            matcher,
+            menu: Menu::default(),
+        });
+        Ok(())
     }
 }
 
