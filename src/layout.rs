@@ -1,67 +1,117 @@
 //! Panel geometry in logical pixels, shared by drawing and hit-testing so
 //! the two cannot drift apart.
+//!
+//! The panel is a vertical stack inside `padding`: the input row, an
+//! optional separator, an optional message box and the list, with
+//! `spacing` between neighbours. Each of them is a line of text plus its
+//! own padding, so their heights follow the font.
 
 use crate::text::Text;
 
-/// Vertical room around a line of text inside a row.
-const ROW_PADDING: f32 = 13.0;
-const SEPARATOR: f32 = 1.0;
-const SEPARATOR_GAP: f32 = 6.0;
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
     pub width: f32,
     pub padding: f32,
     pub font_size: f32,
-    pub row: f32,
+    /// Gap between the input row, separator, message and list.
+    pub spacing: f32,
+    /// Height of the line between input and list, 0 for none.
+    pub separator: f32,
+    /// Around the text of the prompt, badge and query.
+    pub input_padding: f32,
+    /// Around the text of each row, also the room left of it.
+    pub row_padding: f32,
+    /// Gap between rows.
+    pub row_spacing: f32,
+    /// Around the text of the message.
+    pub message_padding: f32,
     pub lines: u32,
-    /// A script set a message, shown in a row of its own above the list.
+    /// A script set a message, shown in a box of its own above the list.
     pub message: bool,
 }
 
-impl Layout {
-    pub fn new(width: u32, lines: u32, font_size: f32, padding: f32) -> Self {
+impl Default for Layout {
+    fn default() -> Self {
         Self {
-            width: width as f32,
-            padding,
-            font_size,
-            // Derived from the font, so large fonts do not get clipped.
-            row: Text::line_height(font_size) + ROW_PADDING,
-            lines: lines.max(1),
+            width: 640.0,
+            padding: 10.0,
+            font_size: 15.0,
+            spacing: 3.0,
+            separator: 1.0,
+            input_padding: 6.5,
+            row_padding: 6.5,
+            row_spacing: 0.0,
+            message_padding: 6.5,
+            lines: 10,
             message: false,
         }
     }
+}
 
-    /// Top of the input row.
+impl Layout {
+    /// Height of one line of text.
+    pub fn line(&self) -> f32 {
+        Text::line_height(self.font_size)
+    }
+
+    /// Height of a row box. Derived from the font, so large fonts do not
+    /// get clipped.
+    pub fn row(&self) -> f32 {
+        self.line() + 2.0 * self.row_padding
+    }
+
+    fn lines(&self) -> u32 {
+        self.lines.max(1)
+    }
+
     pub fn input_top(&self) -> f32 {
         self.padding
     }
 
+    pub fn input_height(&self) -> f32 {
+        self.line() + 2.0 * self.input_padding
+    }
+
     /// Top of the separator between input and list.
     pub fn separator_top(&self) -> f32 {
-        self.padding + self.row
+        self.input_top() + self.input_height() + self.spacing
     }
 
-    pub fn separator_height(&self) -> f32 {
-        SEPARATOR
-    }
-
-    /// Top of the message row, when there is one.
+    /// Top of the message box, when there is one.
     pub fn message_top(&self) -> f32 {
-        self.separator_top() + SEPARATOR + SEPARATOR_GAP
+        let below_input = self.input_top() + self.input_height() + self.spacing;
+        if self.separator > 0.0 {
+            below_input + self.separator + self.spacing
+        } else {
+            below_input
+        }
+    }
+
+    pub fn message_height(&self) -> f32 {
+        self.line() + 2.0 * self.message_padding
     }
 
     pub fn list_top(&self) -> f32 {
-        self.message_top() + if self.message { self.row } else { 0.0 }
+        let message = if self.message {
+            self.message_height() + self.spacing
+        } else {
+            0.0
+        };
+        self.message_top() + message
+    }
+
+    pub fn list_height(&self) -> f32 {
+        let n = self.lines() as f32;
+        n * self.row() + (n - 1.0) * self.row_spacing
     }
 
     /// Top of visible row `i`.
     pub fn row_top(&self, i: usize) -> f32 {
-        self.list_top() + i as f32 * self.row
+        self.list_top() + i as f32 * (self.row() + self.row_spacing)
     }
 
     pub fn height(&self) -> f32 {
-        self.list_top() + self.lines as f32 * self.row + self.padding
+        self.list_top() + self.list_height() + self.padding
     }
 
     /// Panel size, rounded up to whole logical pixels.
@@ -69,14 +119,17 @@ impl Layout {
         (self.width.ceil() as u32, self.height().ceil() as u32)
     }
 
-    /// The visible row under surface coordinate `y`, if any.
+    /// The visible row under surface coordinate `y`, if any. The gaps
+    /// between rows belong to none.
     pub fn row_at(&self, y: f64) -> Option<usize> {
         let offset = y as f32 - self.list_top();
         if offset < 0.0 {
             return None;
         }
-        let row = (offset / self.row) as usize;
-        (row < self.lines as usize).then_some(row)
+        let pitch = self.row() + self.row_spacing;
+        let row = (offset / pitch) as usize;
+        let inside = offset - row as f32 * pitch < self.row();
+        (inside && row < self.lines() as usize).then_some(row)
     }
 }
 
@@ -84,37 +137,72 @@ impl Layout {
 mod tests {
     use super::*;
 
+    fn layout() -> Layout {
+        Layout {
+            lines: 5,
+            ..Layout::default()
+        }
+    }
+
     #[test]
     fn row_at_matches_row_top() {
-        let layout = Layout::new(640, 5, 15.0, 10.0);
-        for i in 0..5 {
-            let top = layout.row_top(i) as f64;
-            assert_eq!(layout.row_at(top + 0.5), Some(i));
-            assert_eq!(layout.row_at(top + layout.row as f64 - 0.5), Some(i));
+        for layout in [
+            layout(),
+            Layout {
+                row_spacing: 5.0,
+                ..layout()
+            },
+        ] {
+            for i in 0..5 {
+                let top = layout.row_top(i) as f64;
+                assert_eq!(layout.row_at(top + 0.5), Some(i));
+                assert_eq!(layout.row_at(top + layout.row() as f64 - 0.5), Some(i));
+            }
         }
     }
 
     #[test]
     fn row_at_outside_the_list() {
-        let layout = Layout::new(640, 5, 15.0, 10.0);
+        let layout = layout();
         assert_eq!(layout.row_at(layout.input_top() as f64 + 1.0), None);
         assert_eq!(layout.row_at(layout.row_top(5) as f64 + 1.0), None);
     }
 
     #[test]
+    fn gaps_between_rows_hit_nothing() {
+        let layout = Layout {
+            row_spacing: 5.0,
+            ..layout()
+        };
+        let gap = (layout.row_top(0) + layout.row()) as f64 + 2.0;
+        assert_eq!(layout.row_at(gap), None);
+    }
+
+    #[test]
     fn message_pushes_the_list_down() {
-        let mut layout = Layout::new(640, 5, 15.0, 10.0);
+        let mut layout = layout();
         let (top, height) = (layout.row_top(0), layout.height());
         layout.message = true;
-        assert_eq!(layout.row_top(0), top + layout.row);
-        assert_eq!(layout.height(), height + layout.row);
-        // The message row is not a list row.
+        let shift = layout.message_height() + layout.spacing;
+        assert_eq!(layout.row_top(0), top + shift);
+        assert_eq!(layout.height(), height + shift);
+        // The message box is not a list row.
         assert_eq!(layout.row_at(layout.message_top() as f64 + 1.0), None);
+    }
+
+    #[test]
+    fn no_separator_takes_no_room() {
+        let with = layout();
+        let without = Layout {
+            separator: 0.0,
+            ..layout()
+        };
+        assert_eq!(with.list_top() - without.list_top(), with.separator + with.spacing);
     }
 
     #[test]
     fn default_row_height_is_unchanged() {
         // 15px text used to sit in hardcoded 32px rows.
-        assert_eq!(Layout::new(640, 10, 15.0, 10.0).row, 32.0);
+        assert_eq!(Layout::default().row(), 32.0);
     }
 }

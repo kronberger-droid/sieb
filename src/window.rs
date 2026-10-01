@@ -669,6 +669,7 @@ impl App {
                 .map(|(entry, indices)| (entry.text.as_str(), indices))
                 .collect(),
             selected,
+            scroll,
             matched,
             total,
         };
@@ -706,7 +707,7 @@ impl App {
                 .pool
                 .create_buffer(1, 1, 4, wl_shm::Format::Argb8888)
                 .expect("allocate backdrop buffer");
-            render::backdrop(&mut canvas[..4], self.options.theme.backdrop);
+            render::backdrop(&mut canvas[..4], self.options.theme.colors.backdrop);
             buffer.attach_to(backdrop).expect("attach backdrop buffer");
             backdrop.damage_buffer(0, 0, 1, 1);
             self.backdrop_buffer = Some(buffer);
@@ -1053,7 +1054,7 @@ impl PointerHandler for App {
                         vertical.value120,
                         vertical.discrete,
                         vertical.absolute,
-                        self.options.layout.row as f64,
+                        self.options.layout.row() as f64,
                     );
                     if steps != 0 {
                         let count = self.matcher.counts().0;

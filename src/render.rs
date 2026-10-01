@@ -9,37 +9,103 @@ use crate::text::{Canvas, Clip, Text};
 /// minified JSON blob on stdin would otherwise stall every frame.
 const MAX_GRAPHEMES: usize = 300;
 const CARET_WIDTH: f32 = 2.0;
-const PROMPT_GAP: f32 = 8.0;
+const SCROLLBAR_WIDTH: f32 = 5.0;
+
+pub const TRANSPARENT: [u8; 4] = [0; 4];
 
 /// Colors as straight (not premultiplied) RGBA.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Theme {
+pub struct Palette {
     pub background: [u8; 4],
     pub border: [u8; 4],
+    /// Behind the selected row.
     pub selected: [u8; 4],
+    /// Text of the selected row.
+    pub selected_text: [u8; 4],
     pub separator: [u8; 4],
     pub text: [u8; 4],
+    /// The match counter.
     pub dim: [u8; 4],
+    /// The caret.
     pub accent: [u8; 4],
+    /// Matched characters.
+    pub matched: [u8; 4],
+    /// Matched characters on the selected row.
+    pub selected_match: [u8; 4],
+    /// Behind every other row.
+    pub row: [u8; 4],
+    pub placeholder: [u8; 4],
+    pub prompt: [u8; 4],
+    pub prompt_background: [u8; 4],
+    pub badge: [u8; 4],
+    pub badge_background: [u8; 4],
+    pub message: [u8; 4],
+    pub message_background: [u8; 4],
+    pub scrollbar: [u8; 4],
+    pub scrollbar_handle: [u8; 4],
     pub backdrop: [u8; 4],
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        let text = [0xcd, 0xd6, 0xf4, 0xff];
+        let dim = [0x7f, 0x84, 0x9c, 0xff];
+        let accent = [0xf5, 0xc2, 0xe7, 0xff];
+        let surface = [0x31, 0x32, 0x44, 0xff];
+        Self {
+            background: [0x1e, 0x1e, 0x2e, 0xf2],
+            border: [0x58, 0x5b, 0x70, 0xff],
+            selected: surface,
+            selected_text: text,
+            separator: surface,
+            text,
+            dim,
+            accent,
+            matched: accent,
+            selected_match: accent,
+            row: TRANSPARENT,
+            placeholder: dim,
+            prompt: accent,
+            prompt_background: TRANSPARENT,
+            badge: [0x1e, 0x1e, 0x2e, 0xff],
+            badge_background: accent,
+            message: dim,
+            message_background: TRANSPARENT,
+            scrollbar: surface,
+            scrollbar_handle: dim,
+            // A light dim, so it reads as modal without hiding what is behind.
+            backdrop: [0x00, 0x00, 0x00, 0x40],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Theme {
+    pub colors: Palette,
     pub radius: f32,
     pub border_width: f32,
+    /// Corners of rows, the message box and the prompt and badge pills.
+    pub row_radius: f32,
+    /// Shown in the empty query.
+    pub placeholder: String,
+    /// A pill left of the prompt, like a power glyph. Empty for none.
+    pub badge: String,
+    /// Show `matched/total` right of the query.
+    pub counter: bool,
+    pub scrollbar: bool,
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            background: [0x1e, 0x1e, 0x2e, 0xf2],
-            border: [0x58, 0x5b, 0x70, 0xff],
-            selected: [0x31, 0x32, 0x44, 0xff],
-            separator: [0x31, 0x32, 0x44, 0xff],
-            text: [0xcd, 0xd6, 0xf4, 0xff],
-            dim: [0x7f, 0x84, 0x9c, 0xff],
-            accent: [0xf5, 0xc2, 0xe7, 0xff],
-            // A light dim, so it reads as modal without hiding what is behind.
-            backdrop: [0x00, 0x00, 0x00, 0x40],
+            colors: Palette::default(),
             radius: 12.0,
             border_width: 1.0,
+            row_radius: 6.0,
+            placeholder: String::new(),
+            badge: String::new(),
+            counter: true,
+            scrollbar: false,
         }
     }
 }
@@ -53,8 +119,16 @@ pub struct View<'a> {
     pub rows: Vec<(&'a str, Vec<u32>)>,
     /// Index into `rows`.
     pub selected: Option<usize>,
+    /// Rank of the first visible row.
+    pub scroll: u32,
     pub matched: u32,
     pub total: u32,
+}
+
+/// A horizontal span of the input row, in physical pixels.
+struct Pill {
+    left: f32,
+    width: f32,
 }
 
 /// Draws the panel into a `wl_shm` ARGB8888 buffer of `width` x `height`
@@ -72,59 +146,114 @@ pub fn panel(
     view: &View,
 ) {
     let s = |v: f32| v * scale;
-    let pad = s(layout.padding);
-    let row = s(layout.row);
+    let c = &theme.colors;
+    let size = s(layout.font_size);
+    let line = Text::line_height(size);
+    let left = s(layout.padding);
+    let right = width as f32 - left;
+    let gap = s(layout.spacing);
+    let input_padding = s(layout.input_padding);
+    let row_radius = s(theme.row_radius);
+    // Centers a line of text in a box starting at `top`.
+    let text_top = |top: f32, height: f32| top + (height - line) / 2.0;
+
+    // Measured before drawing, since the shapes depend on text widths.
+    let mut x = left;
+    let mut pill = |label: Option<&str>, text: &mut Text| {
+        let label = label.filter(|label| !label.is_empty())?;
+        let width = text.width(size, label) + 2.0 * input_padding;
+        let pill = Pill { left: x, width };
+        x += width + gap;
+        Some(pill)
+    };
+    let badge = pill(Some(theme.badge.as_str()), text);
+    let prompt = pill(view.prompt, text);
+    let counter = theme
+        .counter
+        .then(|| format!("{}/{}", view.matched, view.total));
+    let counter_width = counter.as_deref().map(|counter| text.width(size, counter));
+    let query_left = x + input_padding;
+    let query_right = match counter_width {
+        Some(w) => right - input_padding - w - gap,
+        None => right - input_padding,
+    };
+
+    let input_top = s(layout.input_top());
+    let input_height = s(layout.input_height());
+    let message_top = s(layout.message_top());
+    let message_height = s(layout.message_height());
+    let row_height = s(layout.row());
+    let list_top = s(layout.list_top());
+    let list_height = s(layout.list_height());
+    let scrollbar_width = s(SCROLLBAR_WIDTH);
+    let list_right = if theme.scrollbar {
+        right - scrollbar_width - s(layout.row_spacing.max(4.0))
+    } else {
+        right
+    };
 
     // Shapes first, with tiny-skia.
     {
         let mut pixmap =
             PixmapMut::from_bytes(canvas, width, height).expect("canvas size mismatch");
         pixmap.fill(Color::TRANSPARENT);
-
-        // Inset by half the border so the stroke lands inside the buffer.
-        let inset = s(theme.border_width) / 2.0;
-        let card = rounded_rect(
-            inset,
-            inset,
-            width as f32 - 2.0 * inset,
-            height as f32 - 2.0 * inset,
-            s(theme.radius),
-        );
         let mut paint = Paint {
             anti_alias: true,
             ..Paint::default()
         };
-        paint.set_color(color(theme.background));
-        pixmap.fill_path(&card, &paint, FillRule::Winding, Transform::identity(), None);
+        let mut fill = |x: f32, y: f32, w: f32, h: f32, r: f32, rgba: [u8; 4]| {
+            if rgba[3] == 0 || w <= 0.0 || h <= 0.0 {
+                return;
+            }
+            paint.set_color(color(rgba));
+            let path = rounded_rect(x, y, w, h, r);
+            pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        };
+
+        fill(0.0, 0.0, width as f32, height as f32, s(theme.radius), c.background);
+        for (pill, background) in [(&badge, c.badge_background), (&prompt, c.prompt_background)] {
+            if let Some(pill) = pill {
+                fill(pill.left, input_top, pill.width, input_height, row_radius, background);
+            }
+        }
+        if layout.separator > 0.0 {
+            let top = s(layout.separator_top());
+            fill(left, top, right - left, s(layout.separator).max(1.0), 0.0, c.separator);
+        }
+        if view.message.is_some() {
+            let background = c.message_background;
+            fill(left, message_top, right - left, message_height, row_radius, background);
+        }
+        for i in 0..view.rows.len() {
+            let background = if view.selected == Some(i) { c.selected } else { c.row };
+            let top = s(layout.row_top(i));
+            fill(left, top, list_right - left, row_height, row_radius, background);
+        }
+        if theme.scrollbar {
+            let x = right - scrollbar_width;
+            let radius = scrollbar_width / 2.0;
+            fill(x, list_top, scrollbar_width, list_height, radius, c.scrollbar);
+            let (top, length) = handle(view.scroll, layout.lines, view.matched);
+            let (top, length) = (list_top + top * list_height, length * list_height);
+            fill(x, top, scrollbar_width, length, radius, c.scrollbar_handle);
+        }
+
+        // Last, so it draws over whatever reaches the edge.
         if theme.border_width > 0.0 {
-            paint.set_color(color(theme.border));
+            let inset = s(theme.border_width) / 2.0;
+            let card = rounded_rect(
+                inset,
+                inset,
+                width as f32 - 2.0 * inset,
+                height as f32 - 2.0 * inset,
+                s(theme.radius),
+            );
+            paint.set_color(color(c.border));
             let stroke = Stroke {
                 width: s(theme.border_width),
                 ..Stroke::default()
             };
             pixmap.stroke_path(&card, &paint, &stroke, Transform::identity(), None);
-        }
-
-        let separator = rounded_rect(
-            pad,
-            s(layout.separator_top()),
-            width as f32 - 2.0 * pad,
-            s(layout.separator_height()).max(1.0),
-            0.0,
-        );
-        paint.set_color(color(theme.separator));
-        pixmap.fill_path(&separator, &paint, FillRule::Winding, Transform::identity(), None);
-
-        if let Some(selected) = view.selected {
-            let highlight = rounded_rect(
-                pad / 2.0,
-                s(layout.row_top(selected)),
-                width as f32 - pad,
-                row,
-                s(theme.radius / 2.0),
-            );
-            paint.set_color(color(theme.selected));
-            pixmap.fill_path(&highlight, &paint, FillRule::Winding, Transform::identity(), None);
         }
     }
 
@@ -134,91 +263,88 @@ pub fn panel(
         width,
         height,
     };
-    let size = s(layout.font_size);
-    let baseline_offset = (row - Text::line_height(size)) / 2.0;
-    let text_left = pad * 1.5;
-    let clip = Clip {
-        left: pad as i32,
-        right: (width as f32 - pad) as i32,
+    let clip = |left: f32, right: f32| Clip {
+        left: left as i32,
+        right: right as i32,
     };
 
-    // Input row: prompt, query, caret, and the counter on the right.
-    let y = s(layout.input_top()) + baseline_offset;
-    let counter = format!("{}/{}", view.matched, view.total);
-    let counter_x = width as f32 - text_left - text.width(size, &counter);
-    text.draw(
-        &mut canvas,
-        counter_x,
-        y,
-        size,
-        clip,
-        [(counter.as_str(), text_color(theme.dim))],
-    );
-
-    let mut query_left = text_left;
-    if let Some(prompt) = view.prompt {
-        let prompt_clip = Clip {
-            right: (counter_x - pad) as i32,
-            ..clip
-        };
-        query_left +=
-            text.draw(&mut canvas, text_left, y, size, prompt_clip, [(prompt, text_color(theme.accent))]);
-        query_left += s(PROMPT_GAP);
+    // Input row: badge, prompt, query or placeholder, caret, counter.
+    let y = text_top(input_top, input_height);
+    let labels = [
+        (&badge, Some(theme.badge.as_str()), c.badge),
+        (&prompt, view.prompt, c.prompt),
+    ];
+    for (pill, label, rgba) in labels {
+        if let (Some(pill), Some(label)) = (pill, label) {
+            let x = pill.left + input_padding;
+            let clip = clip(pill.left, pill.left + pill.width);
+            text.draw(&mut canvas, x, y, size, clip, [(label, text_color(rgba))]);
+        }
     }
-    // The query gets its own clip starting after the prompt. When it is wider
-    // than the room left, it scrolls so its end, where typing happens, stays
-    // in view.
-    let query_right = counter_x - pad;
+    if let (Some(counter), Some(w)) = (&counter, counter_width) {
+        let x = right - input_padding - w;
+        let spans = [(counter.as_str(), text_color(c.dim))];
+        text.draw(&mut canvas, x, y, size, clip(x, right), spans);
+    }
+
+    // The query gets its own clip. When it is wider than the room left, it
+    // scrolls so its end, where typing happens, stays in view.
     let caret_width = s(CARET_WIDTH);
     let room = query_right - query_left - caret_width - s(1.0);
     let query_width = text.width(size, view.query);
     let shift = (query_width - room).max(0.0);
-    let query_clip = Clip {
-        left: query_left as i32,
-        right: query_right as i32,
-    };
-    text.draw(
-        &mut canvas,
-        query_left - shift,
-        y,
-        size,
-        query_clip,
-        [(view.query, text_color(theme.text))],
-    );
+    let query_clip = clip(query_left, query_right);
+    if view.query.is_empty() && !theme.placeholder.is_empty() {
+        let x = query_left + caret_width + s(1.0);
+        let placeholder = [(theme.placeholder.as_str(), text_color(c.placeholder))];
+        text.draw(&mut canvas, x, y, size, query_clip, placeholder);
+    } else {
+        let query = [(view.query, text_color(c.text))];
+        text.draw(&mut canvas, query_left - shift, y, size, query_clip, query);
+    }
     let caret_x = (query_left - shift + query_width + s(1.0)).min(query_right - caret_width);
     if caret_x >= query_left {
-        fill(
-            &mut canvas,
-            theme.accent,
-            caret_x,
-            s(layout.input_top()) + row * 0.25,
-            caret_width,
-            row * 0.5,
-        );
+        let caret_height = line * 0.9;
+        let caret_top = input_top + (input_height - caret_height) / 2.0;
+        fill(&mut canvas, c.accent, caret_x, caret_top, caret_width, caret_height);
     }
 
     if let Some(message) = view.message {
-        let y = s(layout.message_top()) + baseline_offset;
-        text.draw(&mut canvas, text_left, y, size, clip, [(message, text_color(theme.dim))]);
+        let x = left + s(layout.message_padding);
+        let y = text_top(message_top, message_height);
+        let clip = clip(left, right - s(layout.message_padding));
+        text.draw(&mut canvas, x, y, size, clip, [(message, text_color(c.message))]);
     }
 
     // Match list.
+    let row_left = left + s(layout.row_padding);
+    let row_clip = clip(left, list_right - s(layout.row_padding));
     for (i, (line, indices)) in view.rows.iter().enumerate() {
-        let y = s(layout.row_top(i)) + baseline_offset;
+        let y = text_top(s(layout.row_top(i)), row_height);
+        let (plain, hit) = if view.selected == Some(i) {
+            (c.selected_text, c.selected_match)
+        } else {
+            (c.text, c.matched)
+        };
         let spans = highlight(line, indices);
-        text.draw(
-            &mut canvas,
-            text_left,
-            y,
-            size,
-            clip,
-            spans.iter().map(|&(span, hit)| {
-                (span, text_color(if hit { theme.accent } else { theme.text }))
-            }),
-        );
+        let spans = spans
+            .iter()
+            .map(|&(span, matched)| (span, text_color(if matched { hit } else { plain })));
+        text.draw(&mut canvas, row_left, y, size, row_clip, spans);
     }
 
     to_argb8888(canvas.data);
+}
+
+/// The scrollbar handle's top and length as fractions of the track, for
+/// `lines` rows shown from rank `scroll` out of `matched`.
+fn handle(scroll: u32, lines: u32, matched: u32) -> (f32, f32) {
+    if matched <= lines {
+        return (0.0, 1.0);
+    }
+    let length = (lines as f32 / matched as f32).max(0.05);
+    let room = (matched - lines) as f32;
+    (scroll as f32 / room * (1.0 - length), length)
 }
 
 /// Splits `line` into runs of matched and unmatched graphemes. nucleo counts
@@ -338,7 +464,7 @@ mod tests {
     fn frame_time() {
         let mut text = Text::load("sans-serif").unwrap();
         let scale = 1.5;
-        let layout = Layout::new(640, 10, 15.0, 10.0);
+        let layout = Layout::default();
         let theme = Theme::default();
         let (w, h) = layout.size();
         let (w, h) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
@@ -352,6 +478,7 @@ mod tests {
             query: "swr",
             rows,
             selected: Some(2),
+            scroll: 0,
             matched: 120,
             total: 4000,
         };
@@ -368,6 +495,15 @@ mod tests {
         backdrop(&mut px, [0xff, 0x00, 0x80, 0x40]);
         // Red ends up in the third byte, every channel scaled by alpha.
         assert_eq!(px, [0x20, 0x00, 0x40, 0x40]);
+    }
+
+    #[test]
+    fn scrollbar_handle() {
+        // Everything fits: the handle fills the track.
+        assert_eq!(handle(0, 10, 4), (0.0, 1.0));
+        // A tenth shown, at the top and at the very end.
+        assert_eq!(handle(0, 10, 100), (0.0, 0.1));
+        assert_eq!(handle(90, 10, 100), (0.9, 0.1));
     }
 
     #[test]

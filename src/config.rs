@@ -10,7 +10,7 @@ use clap::Args;
 use serde::Deserialize;
 
 use crate::layout::Layout;
-use crate::render::Theme;
+use crate::render::{Palette, Theme};
 
 /// A color as `#rgb`, `#rrggbb` or `#rrggbbaa`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +69,10 @@ pub struct Appearance {
     #[arg(long)]
     pub padding: Option<f32>,
 
+    /// Gap between the input, separator, message and list [default: 3]
+    #[arg(long)]
+    pub spacing: Option<f32>,
+
     /// Corner radius [default: 12]
     #[arg(long)]
     pub radius: Option<f32>,
@@ -77,11 +81,53 @@ pub struct Appearance {
     #[arg(long)]
     pub border_width: Option<f32>,
 
+    /// Height of the line under the input, 0 for none [default: 1]
+    #[arg(long)]
+    pub separator_width: Option<f32>,
+
+    /// Room around the prompt, badge and query [default: 6.5]
+    #[arg(long)]
+    pub input_padding: Option<f32>,
+
+    /// Room around the text of each row [default: 6.5]
+    #[arg(long)]
+    pub row_padding: Option<f32>,
+
+    /// Gap between rows [default: 0]
+    #[arg(long)]
+    pub row_spacing: Option<f32>,
+
+    /// Corner radius of rows, the message and the pills [default: 6]
+    #[arg(long)]
+    pub row_radius: Option<f32>,
+
+    /// Room around the message text [default: 6.5]
+    #[arg(long)]
+    pub message_padding: Option<f32>,
+
+    /// Text shown while the query is empty
+    #[arg(long, value_name = "TEXT")]
+    pub placeholder: Option<String>,
+
+    /// Text of a pill left of the prompt, such as a glyph
+    #[arg(long, value_name = "TEXT")]
+    pub badge: Option<String>,
+
+    /// Show the match counter [default: true]
+    #[arg(long, value_name = "BOOL")]
+    pub counter: Option<bool>,
+
+    /// Show a scrollbar right of the list [default: false]
+    #[arg(long, value_name = "BOOL")]
+    pub scrollbar: Option<bool>,
+
     #[command(flatten)]
     #[serde(default)]
     pub colors: Colors,
 }
 
+/// Colors left unset fall back to a related one, noted in brackets, so a
+/// theme can stay short.
 #[derive(Args, Deserialize, Debug, Default, Clone, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 #[command(next_help_heading = "Colors")]
@@ -95,6 +141,9 @@ pub struct Colors {
     /// Selected row
     #[arg(long = "color-selected", value_name = "COLOR")]
     pub selected: Option<Rgba>,
+    /// Text of the selected row [text]
+    #[arg(long = "color-selected-text", value_name = "COLOR")]
+    pub selected_text: Option<Rgba>,
     /// Line between input and list
     #[arg(long = "color-separator", value_name = "COLOR")]
     pub separator: Option<Rgba>,
@@ -104,9 +153,46 @@ pub struct Colors {
     /// Match counter
     #[arg(long = "color-dim", value_name = "COLOR")]
     pub dim: Option<Rgba>,
-    /// Prompt, caret and matched characters
+    /// Caret, and what the colors below fall back to
     #[arg(long = "color-accent", value_name = "COLOR")]
     pub accent: Option<Rgba>,
+    /// Matched characters [accent]
+    #[arg(long = "color-match", id = "color-match", value_name = "COLOR")]
+    #[serde(rename = "match")]
+    pub matched: Option<Rgba>,
+    /// Matched characters on the selected row [match]
+    #[arg(long = "color-selected-match", value_name = "COLOR")]
+    pub selected_match: Option<Rgba>,
+    /// Behind the other rows [none]
+    #[arg(long = "color-row", id = "color-row", value_name = "COLOR")]
+    pub row: Option<Rgba>,
+    /// Placeholder text [dim]
+    #[arg(long = "color-placeholder", id = "color-placeholder", value_name = "COLOR")]
+    pub placeholder: Option<Rgba>,
+    /// Prompt text [accent]
+    #[arg(long = "color-prompt", id = "color-prompt", value_name = "COLOR")]
+    pub prompt: Option<Rgba>,
+    /// Behind the prompt [none]
+    #[arg(long = "color-prompt-background", value_name = "COLOR")]
+    pub prompt_background: Option<Rgba>,
+    /// Badge text [background]
+    #[arg(long = "color-badge", id = "color-badge", value_name = "COLOR")]
+    pub badge: Option<Rgba>,
+    /// Behind the badge [accent]
+    #[arg(long = "color-badge-background", value_name = "COLOR")]
+    pub badge_background: Option<Rgba>,
+    /// Message text [dim]
+    #[arg(long = "color-message", id = "color-message", value_name = "COLOR")]
+    pub message: Option<Rgba>,
+    /// Behind the message [none]
+    #[arg(long = "color-message-background", value_name = "COLOR")]
+    pub message_background: Option<Rgba>,
+    /// Scrollbar track [separator]
+    #[arg(long = "color-scrollbar", id = "color-scrollbar", value_name = "COLOR")]
+    pub scrollbar: Option<Rgba>,
+    /// Scrollbar handle [dim]
+    #[arg(long = "color-scrollbar-handle", value_name = "COLOR")]
+    pub scrollbar_handle: Option<Rgba>,
     /// Tint over the rest of the output, #00000000 for none
     #[arg(long = "color-backdrop", value_name = "COLOR")]
     pub backdrop: Option<Rgba>,
@@ -122,9 +208,54 @@ macro_rules! merge {
 impl Appearance {
     /// Flags win over the file.
     pub fn over(mut self, file: Appearance) -> Appearance {
-        merge!(self, file, font, font_size, lines, width, padding, radius, border_width);
+        merge!(
+            self,
+            file,
+            font,
+            font_size,
+            lines,
+            width,
+            padding,
+            spacing,
+            radius,
+            border_width,
+            separator_width,
+            input_padding,
+            row_padding,
+            row_spacing,
+            row_radius,
+            message_padding,
+            placeholder,
+            badge,
+            counter,
+            scrollbar
+        );
         let (mut colors, file) = (self.colors, file.colors);
-        merge!(colors, file, background, border, selected, separator, text, dim, accent, backdrop);
+        merge!(
+            colors,
+            file,
+            background,
+            border,
+            selected,
+            selected_text,
+            separator,
+            text,
+            dim,
+            accent,
+            matched,
+            selected_match,
+            row,
+            placeholder,
+            prompt,
+            prompt_background,
+            badge,
+            badge_background,
+            message,
+            message_background,
+            scrollbar,
+            scrollbar_handle,
+            backdrop
+        );
         self.colors = colors;
         self
     }
@@ -139,8 +270,15 @@ impl Appearance {
         ];
         let non_negative = [
             ("padding", self.padding),
+            ("spacing", self.spacing),
             ("radius", self.radius),
             ("border-width", self.border_width),
+            ("separator-width", self.separator_width),
+            ("input-padding", self.input_padding),
+            ("row-padding", self.row_padding),
+            ("row-spacing", self.row_spacing),
+            ("row-radius", self.row_radius),
+            ("message-padding", self.message_padding),
         ];
         for (key, value) in positive {
             if let Some(v) = value
@@ -162,26 +300,66 @@ impl Appearance {
     /// Validates and fills the rest from the built-in defaults.
     pub fn resolve(self) -> Result<(String, Layout, Theme), String> {
         self.validate()?;
-        let layout = Layout::new(
-            self.width.unwrap_or(640),
-            self.lines.unwrap_or(10),
-            self.font_size.unwrap_or(15.0),
-            self.padding.unwrap_or(10.0),
-        );
-        let d = Theme::default();
+        let d = Layout::default();
+        let layout = Layout {
+            width: self.width.map_or(d.width, |w| w as f32),
+            padding: self.padding.unwrap_or(d.padding),
+            font_size: self.font_size.unwrap_or(d.font_size),
+            spacing: self.spacing.unwrap_or(d.spacing),
+            separator: self.separator_width.unwrap_or(d.separator),
+            input_padding: self.input_padding.unwrap_or(d.input_padding),
+            row_padding: self.row_padding.unwrap_or(d.row_padding),
+            row_spacing: self.row_spacing.unwrap_or(d.row_spacing),
+            message_padding: self.message_padding.unwrap_or(d.message_padding),
+            lines: self.lines.unwrap_or(d.lines),
+            message: false,
+        };
+
+        let d = Palette::default();
         let c = self.colors;
         let pick = |color: Option<Rgba>, default: [u8; 4]| color.map_or(default, |c| c.0);
-        let theme = Theme {
-            background: pick(c.background, d.background),
+        let background = pick(c.background, d.background);
+        let text = pick(c.text, d.text);
+        let dim = pick(c.dim, d.dim);
+        let accent = pick(c.accent, d.accent);
+        let separator = pick(c.separator, d.separator);
+        let matched = pick(c.matched, accent);
+        // The badge is text on an accent pill, so it defaults to the panel
+        // color, opaque.
+        let [r, g, b, _] = background;
+        let colors = Palette {
+            background,
             border: pick(c.border, d.border),
             selected: pick(c.selected, d.selected),
-            separator: pick(c.separator, d.separator),
-            text: pick(c.text, d.text),
-            dim: pick(c.dim, d.dim),
-            accent: pick(c.accent, d.accent),
+            selected_text: pick(c.selected_text, text),
+            separator,
+            text,
+            dim,
+            accent,
+            matched,
+            selected_match: pick(c.selected_match, matched),
+            row: pick(c.row, d.row),
+            placeholder: pick(c.placeholder, dim),
+            prompt: pick(c.prompt, accent),
+            prompt_background: pick(c.prompt_background, d.prompt_background),
+            badge: pick(c.badge, [r, g, b, 0xff]),
+            badge_background: pick(c.badge_background, accent),
+            message: pick(c.message, dim),
+            message_background: pick(c.message_background, d.message_background),
+            scrollbar: pick(c.scrollbar, separator),
+            scrollbar_handle: pick(c.scrollbar_handle, dim),
             backdrop: pick(c.backdrop, d.backdrop),
+        };
+        let d = Theme::default();
+        let theme = Theme {
+            colors,
             radius: self.radius.unwrap_or(d.radius),
             border_width: self.border_width.unwrap_or(d.border_width),
+            row_radius: self.row_radius.unwrap_or(d.row_radius),
+            placeholder: self.placeholder.unwrap_or(d.placeholder),
+            badge: self.badge.unwrap_or(d.badge),
+            counter: self.counter.unwrap_or(d.counter),
+            scrollbar: self.scrollbar.unwrap_or(d.scrollbar),
         };
         Ok((self.font.unwrap_or_else(|| "sans-serif".into()), layout, theme))
     }
@@ -264,9 +442,27 @@ mod tests {
         assert_eq!(font, "sans-serif");
         assert_eq!(layout.lines, 7);
         assert_eq!(layout.font_size, 18.0);
-        assert_eq!(theme.accent, [0, 0, 0xff, 0xff]);
-        assert_eq!(theme.border, [0, 0xff, 0, 0xff]);
-        assert_eq!(theme.background, Theme::default().background);
+        assert_eq!(theme.colors.accent, [0, 0, 0xff, 0xff]);
+        assert_eq!(theme.colors.border, [0, 0xff, 0, 0xff]);
+        assert_eq!(theme.colors.background, Palette::default().background);
+    }
+
+    #[test]
+    fn unset_colors_follow_their_fallback() {
+        let file: Appearance = toml::from_str(
+            r##"
+            [colors]
+            accent = "#ff0000"
+            text = "#00ff00"
+            match = "#0000ff"
+            "##,
+        )
+        .unwrap();
+        let (_, _, theme) = file.resolve().unwrap();
+        let c = theme.colors;
+        assert_eq!(c.prompt, [0xff, 0, 0, 0xff]);
+        assert_eq!(c.selected_text, [0, 0xff, 0, 0xff]);
+        assert_eq!(c.selected_match, [0, 0, 0xff, 0xff]);
     }
 
     #[test]
@@ -293,6 +489,17 @@ mod tests {
         let err = toml::from_str::<Appearance>("font-szie = 12").unwrap_err();
         assert!(err.to_string().contains("font-szie"), "{err}");
         assert!(toml::from_str::<Appearance>("[colors]\naccnet = \"#fff\"").is_err());
+    }
+
+    #[test]
+    fn contrib_themes_resolve() {
+        for theme in [
+            include_str!("../contrib/launcher.toml"),
+            include_str!("../contrib/power.toml"),
+        ] {
+            let file: Appearance = toml::from_str(theme).unwrap();
+            file.resolve().unwrap();
+        }
     }
 
     #[test]

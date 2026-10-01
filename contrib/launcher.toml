@@ -1,0 +1,38 @@
+# Theme for the launcher modes (drun.nu, run.nu, files.nu, window.nu),
+# after rofi's launcher style-2 with a base16 "default dark" palette:
+#
+#     sieb --config contrib/launcher.toml --script contrib/drun.nu
+
+font = "JetBrainsMono Nerd Font"
+font-size = 13.333        # 10pt
+width = 800
+lines = 12
+padding = 40
+radius = 8
+border-width = 0
+spacing = 10
+separator-width = 0
+input-padding = 0
+row-padding = 8.5
+row-spacing = 5
+row-radius = 4
+message-padding = 8
+placeholder = "search..."
+counter = false
+scrollbar = true
+
+[colors]
+background = "#1e1e1ee6"
+text = "#dfe1e8"
+accent = "#dfe1e8"
+prompt = "#dfe1e8"
+placeholder = "#dfe1e8"
+row = "#1e1e1ee6"
+selected = "#dfe1e8"
+selected-text = "#1e1e1e"
+match = "#8a8177"
+message = "#dfe1e8"
+message-background = "#2c2f33e6"
+scrollbar = "#2c2f33e6"
+scrollbar-handle = "#dfe1e8"
+backdrop = "#00000000"
