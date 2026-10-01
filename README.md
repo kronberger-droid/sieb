@@ -4,10 +4,19 @@ A dmenu-first picker for Wayland. Lines go in on stdin, the pick comes out
 on stdout. Everything else, like an app launcher or a power menu, is a
 script rather than a built-in mode.
 
+<p align="center">
+  <img src="docs/screenshots/launcher.png" alt="An app launcher with four mode buttons" width="62%">
+  <img src="docs/screenshots/power.png" alt="A power menu showing the host name and uptime" width="34%">
+</p>
+
+The launcher and power menu above are the scripts and themes in
+[`examples/`](examples).
+
 sieb draws its own panel (sctk, tiny-skia, cosmic-text) and streams stdin
 into a [nucleo](https://github.com/helix-editor/nucleo) matcher while the
-window comes up. It needs a compositor with `wlr-layer-shell` and is
-written against [niri](https://github.com/YaLTeR/niri).
+window comes up. It needs a compositor with `wlr-layer-shell`, which
+rules out GNOME. It is written against
+[niri](https://github.com/YaLTeR/niri) and also runs on sway.
 
 ## Install
 
