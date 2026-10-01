@@ -4,6 +4,10 @@
 # Shows how a script drives sieb: called with no argument it prints the
 # first menu, called with the picked entry it either prints a follow-up
 # menu (the confirmation) or acts and prints nothing, which closes sieb.
+#
+# sieb waits for the script's stdout to close. A script that starts a
+# long-running program in the background has to detach its output, e.g.
+# `job spawn { ^firefox o+e> /dev/null }`, or sieb stays open until Esc.
 
 const ACTIONS = {
     Lock: [loginctl lock-session]
