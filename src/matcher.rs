@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Injector, Nucleo, Status};
 
+use crate::format::{self, Format, Line, Row};
+
 /// One input line, with its position in the input stream.
 pub struct Entry {
     pub index: u32,
@@ -13,12 +15,14 @@ pub struct Entry {
     /// Script mode: handed back to the script when this entry is picked.
     pub info: Option<String>,
     pub selectable: bool,
+    /// JSON input: the object this entry came from.
+    pub raw: Option<String>,
 }
 
 /// Adds a row to the matcher. `meta` is matched but not shown, so it goes
 /// into the haystack after the text, where highlight indices past the
 /// visible text simply fall off the end.
-pub fn push(injector: &Injector<Entry>, index: u32, row: crate::script::Row) {
+pub fn push(injector: &Injector<Entry>, index: u32, row: Row) {
     let haystack = match &row.meta {
         Some(meta) => format!("{} {meta}", row.text),
         None => row.text.clone(),
@@ -28,6 +32,7 @@ pub fn push(injector: &Injector<Entry>, index: u32, row: crate::script::Row) {
         text: row.text,
         info: row.info,
         selectable: row.selectable,
+        raw: row.raw,
     };
     injector.push(entry, |_, columns| columns[0] = haystack.as_str().into());
 }
@@ -128,31 +133,25 @@ impl Matcher {
 
 /// Reads lines from `reader` into the matcher on a background thread.
 ///
-/// Lines that are not valid UTF-8 are kept with replacement characters
-/// rather than ending the stream, since one odd filename in `fd | sieb`
-/// should not truncate the list.
-pub fn spawn_reader<R>(mut reader: R, injector: Injector<Entry>) -> JoinHandle<io::Result<()>>
+/// Menu options in the input (JSON only) go to `on_mode`.
+pub fn spawn_reader<R>(
+    reader: R,
+    injector: Injector<Entry>,
+    format: Format,
+    mut on_mode: impl FnMut(String, String) + Send + 'static,
+) -> JoinHandle<io::Result<()>>
 where
     R: BufRead + Send + 'static,
 {
     thread::spawn(move || {
-        let mut buf = Vec::new();
         let mut index = 0;
-        loop {
-            buf.clear();
-            if reader.read_until(b'\n', &mut buf)? == 0 {
-                return Ok(());
+        format::feed(reader, format, |line| match line {
+            Line::Mode(key, value) => on_mode(key, value),
+            Line::Row(row) => {
+                push(&injector, index, row);
+                index += 1;
             }
-            let line = buf.strip_suffix(b"\n").unwrap_or(&buf);
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            let row = crate::script::Row {
-                text: String::from_utf8_lossy(line).into_owned(),
-                selectable: true,
-                ..Default::default()
-            };
-            push(&injector, index, row);
-            index += 1;
-        }
+        })
     })
 }
 
@@ -164,7 +163,7 @@ mod tests {
     fn filter(input: &'static [u8], query: &str) -> Vec<(u32, String)> {
         let mut matcher = Matcher::new(CaseMatching::Smart, Arc::new(|| {}));
         matcher.set_query(query);
-        spawn_reader(Cursor::new(input), matcher.injector())
+        spawn_reader(Cursor::new(input), matcher.injector(), Format::Plain, |_, _| {})
             .join()
             .unwrap()
             .unwrap();

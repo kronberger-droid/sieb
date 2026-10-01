@@ -11,6 +11,7 @@ cosmic-text = { version = "0.19", default-features = false, features = ["std", "
 fontconfig = "0.11"
 nucleo = "0.5.0"
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 smithay-client-toolkit = "0.21"
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 toml = "1.1"

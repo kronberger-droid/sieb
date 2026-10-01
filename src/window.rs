@@ -2,7 +2,7 @@
 //! clicks outside the panel, with the panel itself as a subsurface on top.
 
 use std::error::Error;
-use std::io;
+use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,7 +58,8 @@ use smithay_client_toolkit::{
     subcompositor::SubcompositorState,
 };
 
-use crate::matcher::Matcher;
+use crate::format::Format;
+use crate::matcher::{self, Matcher};
 use crate::script::{self, Call, Retv};
 use crate::picker::{Accept, Picker, Wheel};
 use crate::layout::Layout;
@@ -71,6 +72,8 @@ pub struct Options {
     pub prompt: Option<String>,
     pub case: CaseMatching,
     pub index: bool,
+    /// Print the selection as JSON (dmenu mode with `--json`).
+    pub json: bool,
     pub font: String,
     pub layout: Layout,
     pub theme: Theme,
@@ -78,8 +81,8 @@ pub struct Options {
 
 /// What fills the list.
 pub enum Input {
-    /// dmenu mode: a matcher already fed from stdin.
-    Lines(Matcher),
+    /// dmenu mode: rows from stdin.
+    Stdin(Format),
     /// Script mode: run this script for each menu.
     Script(PathBuf),
 }
@@ -94,7 +97,11 @@ pub enum Outcome {
     Failed(String),
 }
 
-/// Options a script sets for its menu with `\0key\x1fvalue` lines.
+/// Call id for menu options read from stdin in dmenu mode.
+const STDIN: u32 = u32::MAX;
+
+/// Options a script sets for its menu with `\0key\x1fvalue` lines, or
+/// JSON input with an object without `text`.
 #[derive(Default)]
 struct Menu {
     prompt: Option<String>,
@@ -150,35 +157,52 @@ pub struct Wake {
 /// nucleo calls notify for every pushed line, so a plain ping would cost one
 /// eventfd write per input line. The flag collapses those into one wakeup
 /// until the UI has picked the results up.
-pub fn wake() -> io::Result<(Wake, Arc<dyn Fn() + Send + Sync>)> {
+pub fn wake() -> io::Result<Wake> {
     let (ping, source) = make_ping()?;
     let pending = Arc::new(AtomicBool::new(false));
     let flag = pending.clone();
-    let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+    let notify = Arc::new(move || {
         if !flag.swap(true, Ordering::AcqRel) {
             ping.ping();
         }
     });
-    let wake = Wake {
+    Ok(Wake {
         pending,
         source,
-        notify: notify.clone(),
-    };
-    Ok((wake, notify))
+        notify,
+    })
 }
 
 pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dyn Error>> {
-    // The first script call starts before anything else, so it runs while
+    // Input starts streaming before anything else, so it arrives while
     // fonts load and the window maps.
     let (events, event_channel) = channel::channel();
     let mut script = None;
     let matcher = match input {
-        Input::Lines(matcher) => matcher,
+        Input::Stdin(format) => {
+            let matcher = Matcher::new(options.case, wake.notify.clone());
+            // Read errors just end the list; there is no one to report
+            // them to mid-pick.
+            let _ = matcher::spawn_reader(
+                BufReader::new(io::stdin()),
+                matcher.injector(),
+                format,
+                move |key, value| {
+                    let _ = events.send(script::Event::Mode {
+                        call: STDIN,
+                        key,
+                        value,
+                    });
+                },
+            );
+            matcher
+        }
         Input::Script(path) => {
             let mut state = ScriptState {
                 path,
                 events,
-                next_id: 0,
+                // Ids start past the initial menu, which shows nothing.
+                next_id: 1,
                 visible: None,
                 pending: None,
             };
@@ -477,18 +501,21 @@ impl App {
     }
 
     fn script_event(&mut self, event: script::Event) {
+        if let script::Event::Mode { call, key, value } = event {
+            let pending = self.script.as_mut().and_then(|s| s.pending.as_mut());
+            if let Some(pending) = pending.filter(|p| p.id == call) {
+                pending.menu.set(&key, value);
+            } else if self.script.as_ref().is_none_or(|s| s.visible == Some(call)) {
+                self.menu.set(&key, value);
+                self.redraw();
+            }
+            return;
+        }
         let Some(script) = &mut self.script else {
             return;
         };
         match event {
-            script::Event::Mode { call, key, value } => {
-                if let Some(pending) = script.pending.as_mut().filter(|p| p.id == call) {
-                    pending.menu.set(&key, value);
-                } else if script.visible == Some(call) {
-                    self.menu.set(&key, value);
-                    self.redraw();
-                }
-            }
+            script::Event::Mode { .. } => unreachable!("handled above"),
             script::Event::FirstRow { call } => {
                 let Some(pending) = script.pending.take_if(|p| p.id == call) else {
                     return;
@@ -534,15 +561,23 @@ impl App {
     }
 
     fn output(&self, accept: Accept) -> String {
-        match (accept, self.options.index) {
-            (Accept::Match(rank), index) => match self.matcher.get(rank) {
+        let (index, json) = (self.options.index, self.options.json);
+        match accept {
+            Accept::Match(rank) => match self.matcher.get(rank) {
                 Some(entry) if index => entry.index.to_string(),
+                // The whole object, unknown fields included, so a pipeline
+                // gets back the record it put in.
+                Some(entry) if json => entry
+                    .raw
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({ "text": entry.text }).to_string()),
                 Some(entry) => entry.text.clone(),
                 None => String::new(),
             },
             // Typed text has no position in the input. -1 like rofi.
-            (Accept::Query, true) => "-1".into(),
-            (Accept::Query, false) => self.picker.query().to_owned(),
+            Accept::Query if index => "-1".into(),
+            Accept::Query if json => serde_json::json!({ "text": self.picker.query() }).to_string(),
+            Accept::Query => self.picker.query().to_owned(),
         }
     }
 

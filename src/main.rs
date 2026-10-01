@@ -1,4 +1,5 @@
 mod config;
+mod format;
 mod layout;
 mod matcher;
 mod picker;
@@ -36,6 +37,11 @@ struct Cli {
     #[arg(long)]
     index: bool,
 
+    /// Read rows as JSON (one value per line, or one array) and print the
+    /// selected object back as JSON
+    #[arg(long, conflicts_with = "script")]
+    json: bool,
+
     /// Print all matches for QUERY without opening a window
     #[arg(short, long, value_name = "QUERY")]
     filter: Option<String>,
@@ -63,7 +69,7 @@ fn main() -> ExitCode {
     };
 
     match &cli.filter {
-        Some(query) => filter(case, query, cli.index),
+        Some(query) => filter(case, query, cli.index, cli.json),
         None => pick(case, cli),
     }
 }
@@ -80,26 +86,20 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
         Err(err) => return fail(err),
     };
 
-    let (wake, notify) = match window::wake() {
-        Ok(pair) => pair,
+    let wake = match window::wake() {
+        Ok(wake) => wake,
         Err(err) => return fail(err),
     };
     let input = match cli.script {
         Some(path) => window::Input::Script(path),
-        None => {
-            let matcher = Matcher::new(case, notify);
-            // Started before the window, so input streams in while it maps.
-            // Read errors just end the list; there is no one to report them
-            // to mid-pick.
-            let _ = matcher::spawn_reader(BufReader::new(io::stdin()), matcher.injector());
-            window::Input::Lines(matcher)
-        }
+        None => window::Input::Stdin(format(cli.json)),
     };
 
     let options = window::Options {
         prompt: cli.prompt,
         case,
         index: cli.index,
+        json: cli.json,
         font,
         layout,
         theme,
@@ -117,10 +117,23 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
     }
 }
 
-fn filter(case: CaseMatching, query: &str, index: bool) -> ExitCode {
+fn format(json: bool) -> format::Format {
+    if json {
+        format::Format::Json
+    } else {
+        format::Format::Plain
+    }
+}
+
+fn filter(case: CaseMatching, query: &str, index: bool, json: bool) -> ExitCode {
     let mut matcher = Matcher::new(case, Arc::new(|| {}));
     matcher.set_query(query);
-    let reader = matcher::spawn_reader(BufReader::new(io::stdin()), matcher.injector());
+    let reader = matcher::spawn_reader(
+        BufReader::new(io::stdin()),
+        matcher.injector(),
+        format(json),
+        |_, _| {},
+    );
     // The worker going idle only means it caught up with what was injected so
     // far, so wait for EOF before draining it.
     if let Err(err) = reader.join().expect("reader thread panicked") {
@@ -133,10 +146,10 @@ fn filter(case: CaseMatching, query: &str, index: bool) -> ExitCode {
     let mut matched = false;
     for entry in matcher.matches() {
         matched = true;
-        let res = if index {
-            writeln!(out, "{}", entry.index)
-        } else {
-            writeln!(out, "{}", entry.text)
+        let res = match (&entry.raw, index) {
+            (_, true) => writeln!(out, "{}", entry.index),
+            (Some(raw), false) => writeln!(out, "{raw}"),
+            (None, false) => writeln!(out, "{}", entry.text),
         };
         // A closed pipe (`sieb -f x | head`) is a normal way to stop.
         if res.is_err() {

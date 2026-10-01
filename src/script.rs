@@ -5,7 +5,7 @@
 //! picked entry as its argument. Whatever it prints becomes the next menu;
 //! printing nothing ends the session.
 
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufReader};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
@@ -13,52 +13,8 @@ use std::thread;
 use nucleo::Injector;
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
+use crate::format::{self, Format, Line};
 use crate::matcher::{self, Entry};
-
-/// One line of script output.
-#[derive(Debug, PartialEq)]
-pub enum Line {
-    /// `\0key\x1fvalue`: an option for the whole menu, like the prompt.
-    Mode(String, String),
-    Row(Row),
-}
-
-#[derive(Debug, Default, PartialEq)]
-pub struct Row {
-    pub text: String,
-    /// Handed back to the script in `ROFI_INFO` when this row is picked.
-    pub info: Option<String>,
-    /// Extra search terms, matched but not shown.
-    pub meta: Option<String>,
-    pub selectable: bool,
-}
-
-/// Splits rofi's in-band options off a line: `text\0key\x1fvalue\x1f...`.
-pub fn parse(line: &str) -> Line {
-    let (text, options) = line.split_once('\0').unwrap_or((line, ""));
-    let mut pairs = options.split('\x1f');
-    if text.is_empty() && !options.is_empty() {
-        let key = pairs.next().unwrap_or_default().to_owned();
-        let value = pairs.collect::<Vec<_>>().join("\x1f");
-        return Line::Mode(key, value);
-    }
-    let mut row = Row {
-        text: text.to_owned(),
-        selectable: true,
-        ..Row::default()
-    };
-    while let Some(key) = pairs.next() {
-        let value = pairs.next().unwrap_or_default();
-        match key {
-            "info" => row.info = Some(value.to_owned()),
-            "meta" => row.meta = Some(value.to_owned()),
-            "nonselectable" => row.selectable = value != "true",
-            // icon, urgent, active, permanent: not supported yet.
-            _ => {}
-        }
-    }
-    Line::Row(row)
-}
 
 /// Why the script is being called, as `ROFI_RETV`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,29 +92,21 @@ pub fn spawn(
     let mut child = command.spawn()?;
     let stdout = child.stdout.take().expect("stdout is piped");
     thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut buf = Vec::new();
         let mut rows = 0;
-        while let Ok(n) = reader.read_until(b'\n', &mut buf) {
-            if n == 0 {
-                break;
+        // A read error ends the menu where it got to; the exit status
+        // below still tells the UI how the script fared.
+        let _ = format::feed(BufReader::new(stdout), Format::Rofi, |line| match line {
+            Line::Mode(key, value) => {
+                let _ = events.send(Event::Mode { call: id, key, value });
             }
-            let line = buf.strip_suffix(b"\n").unwrap_or(&buf);
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            match parse(&String::from_utf8_lossy(line)) {
-                Line::Mode(key, value) => {
-                    let _ = events.send(Event::Mode { call: id, key, value });
+            Line::Row(row) => {
+                matcher::push(&injector, rows, row);
+                if rows == 0 {
+                    let _ = events.send(Event::FirstRow { call: id });
                 }
-                Line::Row(row) => {
-                    matcher::push(&injector, rows, row);
-                    if rows == 0 {
-                        let _ = events.send(Event::FirstRow { call: id });
-                    }
-                    rows += 1;
-                }
+                rows += 1;
             }
-            buf.clear();
-        }
+        });
         // Waiting reaps the child; a failed wait reads as a failed script.
         let status = child.wait().unwrap_or_else(|_| failed_status());
         let _ = events.send(Event::Done {
@@ -178,39 +126,6 @@ fn failed_status() -> ExitStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn plain_row() {
-        assert_eq!(
-            parse("Shutdown"),
-            Line::Row(Row {
-                text: "Shutdown".into(),
-                selectable: true,
-                ..Row::default()
-            })
-        );
-    }
-
-    #[test]
-    fn row_options() {
-        assert_eq!(
-            parse("Shutdown\0info\x1fpoweroff\x1fmeta\x1fhalt off\x1fnonselectable\x1ftrue\x1ficon\x1fsystem"),
-            Line::Row(Row {
-                text: "Shutdown".into(),
-                info: Some("poweroff".into()),
-                meta: Some("halt off".into()),
-                selectable: false,
-            })
-        );
-    }
-
-    #[test]
-    fn mode_option() {
-        assert_eq!(
-            parse("\0prompt\x1fPower"),
-            Line::Mode("prompt".into(), "Power".into())
-        );
-    }
 
     /// Runs `body` as a script through `spawn` and returns the rows it fed
     /// the matcher plus the events it sent, in order.
@@ -294,10 +209,5 @@ mod tests {
         let (rows, events) = run("exit 3", initial());
         assert!(rows.is_empty());
         assert!(matches!(events[0], Event::Done { rows: 0, status, .. } if status.code() == Some(3)));
-    }
-
-    #[test]
-    fn empty_line_is_an_empty_row() {
-        assert!(matches!(parse(""), Line::Row(row) if row.text.is_empty()));
     }
 }
