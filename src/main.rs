@@ -75,7 +75,10 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
         Ok(file) => file,
         Err(err) => return fail(err),
     };
-    let (font, layout, theme) = cli.appearance.over(file).resolve();
+    let (font, layout, theme) = match cli.appearance.over(file).resolve() {
+        Ok(resolved) => resolved,
+        Err(err) => return fail(err),
+    };
 
     let (wake, notify) = match window::wake() {
         Ok(pair) => pair,

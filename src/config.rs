@@ -129,8 +129,39 @@ impl Appearance {
         self
     }
 
-    /// Fills the rest from the built-in defaults.
-    pub fn resolve(self) -> (String, Layout, Theme) {
+    /// Rejects values that would break drawing. Runs on the merged result,
+    /// so a value from a flag and one from the file get the same rule.
+    fn validate(&self) -> Result<(), String> {
+        let positive = [
+            ("font-size", self.font_size),
+            ("width", self.width.map(|v| v as f32)),
+            ("lines", self.lines.map(|v| v as f32)),
+        ];
+        let non_negative = [
+            ("padding", self.padding),
+            ("radius", self.radius),
+            ("border-width", self.border_width),
+        ];
+        for (key, value) in positive {
+            if let Some(v) = value
+                && !(v.is_finite() && v > 0.0)
+            {
+                return Err(format!("{key} must be greater than 0, got {v}"));
+            }
+        }
+        for (key, value) in non_negative {
+            if let Some(v) = value
+                && !(v.is_finite() && v >= 0.0)
+            {
+                return Err(format!("{key} must not be negative, got {v}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates and fills the rest from the built-in defaults.
+    pub fn resolve(self) -> Result<(String, Layout, Theme), String> {
+        self.validate()?;
         let layout = Layout::new(
             self.width.unwrap_or(640),
             self.lines.unwrap_or(10),
@@ -152,7 +183,7 @@ impl Appearance {
             radius: self.radius.unwrap_or(d.radius),
             border_width: self.border_width.unwrap_or(d.border_width),
         };
-        (self.font.unwrap_or_else(|| "sans-serif".into()), layout, theme)
+        Ok((self.font.unwrap_or_else(|| "sans-serif".into()), layout, theme))
     }
 }
 
@@ -229,13 +260,32 @@ mod tests {
             },
             ..Appearance::default()
         };
-        let (font, layout, theme) = flags.over(file).resolve();
+        let (font, layout, theme) = flags.over(file).resolve().unwrap();
         assert_eq!(font, "sans-serif");
         assert_eq!(layout.lines, 7);
         assert_eq!(layout.font_size, 18.0);
         assert_eq!(theme.accent, [0, 0, 0xff, 0xff]);
         assert_eq!(theme.border, [0, 0xff, 0, 0xff]);
         assert_eq!(theme.background, Theme::default().background);
+    }
+
+    #[test]
+    fn bad_numbers_name_their_key() {
+        for (source, key) in [
+            ("width = 0", "width"),
+            ("font-size = 0", "font-size"),
+            ("font-size = nan", "font-size"),
+            ("lines = 0", "lines"),
+            ("padding = -1", "padding"),
+            ("radius = -3", "radius"),
+        ] {
+            let file: Appearance = toml::from_str(source).unwrap();
+            let err = file.resolve().unwrap_err();
+            assert!(err.starts_with(key), "{source}: {err}");
+        }
+        // Zero is fine where it means "none".
+        let file: Appearance = toml::from_str("border-width = 0\npadding = 0").unwrap();
+        assert!(file.resolve().is_ok());
     }
 
     #[test]
@@ -249,8 +299,8 @@ mod tests {
     fn example_config_matches_defaults() {
         let file: Appearance =
             toml::from_str(include_str!("../contrib/config.toml")).unwrap();
-        let (font, layout, theme) = file.resolve();
-        let (dfont, dlayout, dtheme) = Appearance::default().resolve();
+        let (font, layout, theme) = file.resolve().unwrap();
+        let (dfont, dlayout, dtheme) = Appearance::default().resolve().unwrap();
         assert_eq!(font, dfont);
         assert_eq!(layout.size(), dlayout.size());
         assert_eq!(theme, dtheme);
