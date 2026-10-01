@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use smithay_client_toolkit::{
+    activation::{ActivationHandler, ActivationState, RequestData},
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
     output::{OutputHandler, OutputState},
@@ -151,6 +152,8 @@ struct ScriptState {
     /// The call whose menu is on screen.
     visible: Option<u32>,
     pending: Option<Pending>,
+    /// A picked call waiting for its activation token before it runs.
+    awaiting_token: Option<Call>,
 }
 
 /// Wakes the event loop when the matcher has new results.
@@ -214,16 +217,11 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
                 next_id: 1,
                 visible: None,
                 pending: None,
+                awaiting_token: None,
             };
-            let call = Call {
-                retv: Retv::Initial,
-                arg: None,
-                query: "",
-                info: None,
-                data: None,
-            };
+            // No token: the first menu launches nothing.
             state
-                .start(call, options.case, &wake.notify)
+                .start(Call::initial(), options.case, &wake.notify)
                 .map_err(|err| format!("{}: {err}", state.path.display()))?;
             script = Some(state);
             // Shown until the first menu arrives.
@@ -246,6 +244,8 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
     // Optional: without it we fall back to the integer scale.
     let fractional_manager: Option<WpFractionalScaleManagerV1> =
         globals.bind(&qh, 1..=1, ()).ok();
+    // Optional too: without it, launched apps open the way they always did.
+    let activation = ActivationState::bind(&globals, &qh).ok();
 
     // The backdrop covers the whole output, bars included, and takes the
     // keyboard. Every click outside the panel lands on it.
@@ -281,6 +281,7 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
         loop_handle: event_loop.handle(),
         qh: qh.clone(),
         cursor_shapes: CursorShapeManager::bind(&globals, &qh).ok(),
+        activation,
 
         layer,
         backdrop_viewport,
@@ -307,6 +308,8 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
 
         size: None,
         scale: 1.0,
+        seat: None,
+        serial: 0,
         keyboard: None,
         pointer: None,
         shape_device: None,
@@ -348,6 +351,7 @@ struct App {
     loop_handle: LoopHandle<'static, App>,
     qh: QueueHandle<App>,
     cursor_shapes: Option<CursorShapeManager>,
+    activation: Option<ActivationState>,
 
     layer: LayerSurface,
     backdrop_viewport: WpViewport,
@@ -382,6 +386,10 @@ struct App {
     /// Logical output size, known after the first configure.
     size: Option<(u32, u32)>,
     scale: f64,
+    /// The seat the keyboard is on, and the serial of its latest key press
+    /// or click: what an activation token request has to show.
+    seat: Option<wl_seat::WlSeat>,
+    serial: u32,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
     shape_device: Option<WpCursorShapeDeviceV1>,
@@ -483,14 +491,14 @@ impl App {
         };
         // One call at a time: a second Enter while the script works is
         // dropped rather than queued against a menu that is about to go.
-        if script.pending.is_some() {
+        if script.pending.is_some() || script.awaiting_token.is_some() {
             return;
         }
         let query = self.picker.query();
         let (retv, arg, info) = match accept {
             Accept::Match(rank) => match self.matcher.get(rank) {
                 Some(entry) if entry.selectable => {
-                    (Retv::Entry, entry.text.as_str(), entry.info.as_deref())
+                    (Retv::Entry, entry.text.as_str(), entry.info.clone())
                 }
                 _ => return,
             },
@@ -499,10 +507,33 @@ impl App {
         };
         let call = Call {
             retv,
-            arg: Some(arg),
-            query,
+            arg: Some(arg.to_owned()),
+            query: query.to_owned(),
             info,
-            data: self.menu.data.as_deref(),
+            data: self.menu.data.clone(),
+            token: None,
+        };
+        // Any call may launch something, and only the script knows which.
+        // The token comes back in `new_token`, which then starts the call.
+        if let (Some(activation), Some(seat)) = (&self.activation, &self.seat) {
+            script.awaiting_token = Some(call);
+            activation.request_token(
+                &self.qh,
+                RequestData {
+                    app_id: None,
+                    seat_and_serial: Some((seat.clone(), self.serial)),
+                    surface: Some(self.layer.wl_surface().clone()),
+                    udata: (),
+                },
+            );
+        } else {
+            self.start_call(call);
+        }
+    }
+
+    fn start_call(&mut self, call: Call) {
+        let Some(script) = &mut self.script else {
+            return;
         };
         if let Err(err) = script.start(call, self.options.case, &self.notify) {
             self.outcome = Some(Outcome::Failed(format!("{}: {err}", script.path.display())));
@@ -739,6 +770,22 @@ impl LayerShellHandler for App {
     }
 }
 
+impl ActivationHandler for App {
+    type RequestUdata = ();
+
+    /// The compositor always answers, with a token it may later refuse to
+    /// honor, so the waiting call never hangs here.
+    fn new_token(&mut self, token: String, _: &RequestData<()>) {
+        let call = self.script.as_mut().and_then(|s| s.awaiting_token.take());
+        if let Some(call) = call {
+            self.start_call(Call {
+                token: Some(token),
+                ..call
+            });
+        }
+    }
+}
+
 impl Dispatch<WpFractionalScaleV1, ()> for App {
     fn event(
         app: &mut Self,
@@ -821,6 +868,7 @@ impl SeatHandler for App {
         capability: Capability,
     ) {
         if capability == Capability::Keyboard && self.keyboard.is_none() {
+            self.seat = Some(seat.clone());
             // niri's wl_seat predates compositor-side repeat, so sctk drives
             // repeat from a calloop timer and calls back into `key`.
             self.keyboard = self
@@ -896,9 +944,10 @@ impl KeyboardHandler for App {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
-        _: u32,
+        serial: u32,
         event: KeyEvent,
     ) {
+        self.serial = serial;
         self.key(event);
     }
 
@@ -985,7 +1034,8 @@ impl PointerHandler for App {
                     }
                 }
                 PointerEventKind::Leave { .. } => self.hovered = None,
-                PointerEventKind::Press { button: BTN_LEFT, .. } => {
+                PointerEventKind::Press { button: BTN_LEFT, serial, .. } => {
+                    self.serial = serial;
                     self.pressed = self.options.layout.row_at(event.position.1);
                 }
                 // Single click accepts. Wayland has no double click, and

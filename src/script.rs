@@ -24,13 +24,33 @@ pub enum Retv {
     Custom = 2,
 }
 
-pub struct Call<'a> {
+/// Owned, since a call can wait for its activation token while the menu it
+/// was picked from keeps changing.
+#[derive(Debug)]
+pub struct Call {
     pub retv: Retv,
     /// The picked entry or typed text; none on the initial call.
-    pub arg: Option<&'a str>,
-    pub query: &'a str,
-    pub info: Option<&'a str>,
-    pub data: Option<&'a str>,
+    pub arg: Option<String>,
+    pub query: String,
+    pub info: Option<String>,
+    pub data: Option<String>,
+    /// xdg-activation token for whatever the script launches, so the new
+    /// window may take focus.
+    pub token: Option<String>,
+}
+
+impl Call {
+    /// The first call, which builds the first menu.
+    pub fn initial() -> Self {
+        Self {
+            retv: Retv::Initial,
+            arg: None,
+            query: String::new(),
+            info: None,
+            data: None,
+            token: None,
+        }
+    }
 }
 
 /// Messages from a running call to the UI, tagged with the call they
@@ -64,16 +84,25 @@ pub fn spawn(
 ) -> io::Result<()> {
     let mut command = Command::new(script);
     command
-        .args(call.arg)
+        .args(&call.arg)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    // The names GTK 4 / Qt and GTK 3 read the token from. Without a fresh
+    // one, unset: sieb was likely started with a token of its own, already
+    // spent on mapping sieb, and an app handed that one stays unfocused.
+    for var in ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"] {
+        match &call.token {
+            Some(token) => command.env(var, token),
+            None => command.env_remove(var),
+        };
+    }
     let retv = (call.retv as u8).to_string();
     for (name, value) in [
         ("RETV", Some(retv.as_str())),
-        ("INFO", call.info),
-        ("DATA", call.data),
-        ("QUERY", Some(call.query)),
+        ("INFO", call.info.as_deref()),
+        ("DATA", call.data.as_deref()),
+        ("QUERY", Some(call.query.as_str())),
     ] {
         for prefix in ["SIEB_", "ROFI_"] {
             if prefix == "ROFI_" && name == "QUERY" {
@@ -165,14 +194,8 @@ mod tests {
         (rows, events)
     }
 
-    fn initial() -> Call<'static> {
-        Call {
-            retv: Retv::Initial,
-            arg: None,
-            query: "",
-            info: None,
-            data: None,
-        }
+    fn initial() -> Call {
+        Call::initial()
     }
 
     #[test]
@@ -188,19 +211,29 @@ mod tests {
     fn environment_and_argument() {
         let call = Call {
             retv: Retv::Entry,
-            arg: Some("Shutdown"),
-            query: "shut",
-            info: Some("poweroff"),
-            data: Some("state"),
+            arg: Some("Shutdown".into()),
+            query: "shut".into(),
+            info: Some("poweroff".into()),
+            data: Some("state".into()),
+            token: Some("tok".into()),
         };
-        let script = r#"echo "$1|$ROFI_RETV|$SIEB_RETV|$ROFI_INFO|$ROFI_DATA|$SIEB_QUERY""#;
+        let script = r#"echo "$1|$ROFI_RETV|$SIEB_RETV|$ROFI_INFO|$ROFI_DATA|$SIEB_QUERY|$XDG_ACTIVATION_TOKEN|$DESKTOP_STARTUP_ID""#;
         let (rows, _) = run(script, call);
-        assert_eq!(rows, ["Shutdown|1|1|poweroff|state|shut"]);
+        assert_eq!(rows, ["Shutdown|1|1|poweroff|state|shut|tok|tok"]);
     }
 
     #[test]
     fn unset_info_is_not_inherited() {
         let (rows, _) = run(r#"echo "[${ROFI_INFO-unset}]""#, initial());
+        assert_eq!(rows, ["[unset]"]);
+    }
+
+    #[test]
+    fn stale_activation_token_is_not_inherited() {
+        // Safety: tests run as threads of one process, and no other test
+        // reads this variable.
+        unsafe { std::env::set_var("XDG_ACTIVATION_TOKEN", "stale") };
+        let (rows, _) = run(r#"echo "[${XDG_ACTIVATION_TOKEN-unset}]""#, initial());
         assert_eq!(rows, ["[unset]"]);
     }
 
