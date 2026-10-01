@@ -1,5 +1,7 @@
 //! Query editing, selection and scrolling, independent of any window.
 
+use unicode_segmentation::UnicodeSegmentation;
+
 /// What Enter resolves to.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Accept {
@@ -51,9 +53,14 @@ impl Picker {
         self.edited(before != self.query.len())
     }
 
+    /// Deletes the last grapheme, so an accent typed as a combining
+    /// character goes together with its letter.
     pub fn backspace(&mut self) -> bool {
-        let changed = self.query.pop().is_some();
-        self.edited(changed)
+        let Some((start, _)) = self.query.grapheme_indices(true).next_back() else {
+            return false;
+        };
+        self.query.truncate(start);
+        self.edited(true)
     }
 
     /// Ctrl+U: clear the whole query.
@@ -94,6 +101,11 @@ impl Picker {
         self.follow();
     }
 
+    /// Selects `rank` directly, as hovering a row does.
+    pub fn select(&mut self, rank: u32, count: u32) {
+        self.move_by(rank as i64 - self.selected as i64, count);
+    }
+
     pub fn page(&mut self, pages: i64, count: u32) {
         self.move_by(pages * self.lines as i64, count);
     }
@@ -125,6 +137,36 @@ impl Picker {
     }
 }
 
+/// Turns wheel and touchpad scrolling into whole row steps.
+///
+/// Wheels report steps (`value120` in 1/120ths on newer compositors,
+/// `discrete` on older ones), touchpads only report pixels. Both keep their
+/// remainder, so slow touchpad motion still adds up to a step.
+#[derive(Default)]
+pub struct Wheel {
+    value120: i32,
+    pixels: f64,
+}
+
+impl Wheel {
+    /// Returns the whole rows to move, positive meaning down.
+    pub fn steps(&mut self, value120: i32, discrete: i32, pixels: f64, row: f64) -> i64 {
+        if value120 != 0 {
+            self.value120 += value120;
+            let steps = self.value120 / 120;
+            self.value120 %= 120;
+            steps as i64
+        } else if discrete != 0 {
+            discrete as i64
+        } else {
+            self.pixels += pixels;
+            let steps = (self.pixels / row).trunc();
+            self.pixels -= steps * row;
+            steps as i64
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +185,29 @@ mod tests {
         picker.delete_word();
         assert_eq!(picker.query(), "");
         assert!(!picker.delete_word());
+    }
+
+    #[test]
+    fn backspace_removes_whole_graphemes() {
+        let mut picker = typed("cafe\u{301}");
+        assert!(picker.backspace());
+        assert_eq!(picker.query(), "caf");
+        let mut empty = Picker::new(5);
+        assert!(!empty.backspace());
+    }
+
+    #[test]
+    fn wheel_steps() {
+        let mut wheel = Wheel::default();
+        // High resolution wheels report fractions of a step.
+        assert_eq!(wheel.steps(60, 0, 0.0, 32.0), 0);
+        assert_eq!(wheel.steps(60, 0, 0.0, 32.0), 1);
+        assert_eq!(wheel.steps(-120, 0, 0.0, 32.0), -1);
+        assert_eq!(wheel.steps(0, 2, 0.0, 32.0), 2);
+        // Touchpads accumulate pixels.
+        assert_eq!(wheel.steps(0, 0, 20.0, 32.0), 0);
+        assert_eq!(wheel.steps(0, 0, 20.0, 32.0), 1);
+        assert_eq!(wheel.steps(0, 0, -40.0, 32.0), -1);
     }
 
     #[test]

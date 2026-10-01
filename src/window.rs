@@ -38,7 +38,10 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
-        pointer::{PointerEvent, PointerEventKind, PointerHandler, cursor_shape::CursorShapeManager},
+        pointer::{
+            BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler,
+            cursor_shape::CursorShapeManager,
+        },
     },
     shell::{
         WaylandSurface,
@@ -55,15 +58,17 @@ use smithay_client_toolkit::{
 };
 
 use crate::matcher::Matcher;
-use crate::picker::{Accept, Picker};
-use crate::render::{self, View};
+use crate::picker::{Accept, Picker, Wheel};
+use crate::layout::Layout;
+use crate::render::{self, Theme, View};
 use crate::text::Text;
 
 pub struct Options {
     pub prompt: Option<String>,
-    pub lines: u32,
     pub index: bool,
     pub font: String,
+    pub layout: Layout,
+    pub theme: Theme,
 }
 
 /// How the window was closed.
@@ -136,9 +141,9 @@ pub fn run(options: Options, matcher: Matcher, wake: Wake) -> Result<Outcome, Bo
     // configure carrying the output size, and the first frame follows that.
     layer.commit();
 
-    let panel_size = render::panel_size(options.lines);
+    let (pw, ph) = options.layout.size();
     // Room for two buffers at scale 2 before the pool has to grow.
-    let pool = SlotPool::new(panel_size.0 as usize * panel_size.1 as usize * 4 * 8, &shm)?;
+    let pool = SlotPool::new(pw as usize * ph as usize * 4 * 8, &shm)?;
     let mut app = App {
         registry: RegistryState::new(&globals),
         seats: SeatState::new(&globals, &qh),
@@ -156,10 +161,12 @@ pub fn run(options: Options, matcher: Matcher, wake: Wake) -> Result<Outcome, Bo
         panel_subsurface,
         panel_viewport,
         panel_buffer: None,
-        panel_size,
         fractional,
 
-        picker: Picker::new(options.lines),
+        picker: Picker::new(options.layout.lines),
+        wheel: Wheel::default(),
+        hovered: None,
+        pressed: None,
         options,
         matcher,
         text,
@@ -210,12 +217,16 @@ struct App {
     panel_viewport: WpViewport,
     // Held so the slot stays alive while the compositor may still read it.
     panel_buffer: Option<Buffer>,
-    panel_size: (u32, u32),
     fractional: Option<WpFractionalScaleV1>,
 
     options: Options,
     matcher: Matcher,
     picker: Picker,
+    wheel: Wheel,
+    /// Visible row under the pointer, to act only when it changes.
+    hovered: Option<usize>,
+    /// Visible row a left press started on.
+    pressed: Option<usize>,
     text: Text,
     /// A frame callback is outstanding; draw again when it fires.
     frame_pending: bool,
@@ -305,6 +316,18 @@ impl App {
         }
     }
 
+    /// The match rank shown in visible row `row`, if that row has one.
+    fn rank_at(&self, row: usize) -> Option<u32> {
+        let rank = self.picker.scroll() + row as u32;
+        (rank < self.matcher.counts().0).then_some(rank)
+    }
+
+    fn accept_rank(&mut self, rank: u32) {
+        // The rank is what the user sees, so no settling: it comes from the
+        // snapshot that was drawn.
+        self.outcome = Some(Outcome::Accept(self.output(Accept::Match(rank))));
+    }
+
     fn move_by(&mut self, delta: i64, count: u32) {
         self.picker.move_by(delta, count);
         self.redraw();
@@ -344,7 +367,8 @@ impl App {
             return;
         };
         self.dirty = false;
-        let (pw, ph) = (self.panel_size.0.min(width), self.panel_size.1.min(height));
+        let (pw, ph) = self.options.layout.size();
+        let (pw, ph) = (pw.min(width), ph.min(height));
         // Buffer sizes round half away from zero, as wp_fractional_scale asks.
         let bw = (pw as f64 * self.scale).round() as i32;
         let bh = (ph as f64 * self.scale).round() as i32;
@@ -372,7 +396,16 @@ impl App {
         // Slots are rounded up to 64 byte alignment, so the canvas can be
         // longer than the buffer it backs.
         let canvas = &mut canvas[..(bw * bh * 4) as usize];
-        render::panel(canvas, bw as u32, bh as u32, self.scale as f32, &mut self.text, &view);
+        render::panel(
+            canvas,
+            bw as u32,
+            bh as u32,
+            self.scale as f32,
+            &self.options.layout,
+            &self.options.theme,
+            &mut self.text,
+            &view,
+        );
         self.panel_viewport.set_destination(pw as i32, ph as i32);
         buffer.attach_to(&self.panel).expect("attach panel buffer");
         self.panel.damage_buffer(0, 0, bw, bh);
@@ -389,7 +422,7 @@ impl App {
                 .pool
                 .create_buffer(1, 1, 4, wl_shm::Format::Argb8888)
                 .expect("allocate backdrop buffer");
-            render::backdrop(&mut canvas[..4]);
+            render::backdrop(&mut canvas[..4], self.options.theme.backdrop);
             buffer.attach_to(backdrop).expect("attach backdrop buffer");
             backdrop.damage_buffer(0, 0, 1, 1);
             self.backdrop_buffer = Some(buffer);
@@ -652,6 +685,48 @@ impl PointerHandler for App {
                 // keeps the release from reaching whatever is underneath.
                 PointerEventKind::Release { .. } if &event.surface == self.layer.wl_surface() => {
                     self.outcome = Some(Outcome::Cancel);
+                }
+                _ if event.surface != self.panel => {}
+
+                // Hover follows motion only. A panel mapping under a resting
+                // pointer also sends a position, and acting on that would
+                // silently override the keyboard selection.
+                PointerEventKind::Motion { .. } => {
+                    let row = self.options.layout.row_at(event.position.1);
+                    if row != self.hovered {
+                        self.hovered = row;
+                        if let Some(rank) = row.and_then(|row| self.rank_at(row)) {
+                            let count = self.matcher.counts().0;
+                            self.picker.select(rank, count);
+                            self.redraw();
+                        }
+                    }
+                }
+                PointerEventKind::Leave { .. } => self.hovered = None,
+                PointerEventKind::Press { button: BTN_LEFT, .. } => {
+                    self.pressed = self.options.layout.row_at(event.position.1);
+                }
+                // Single click accepts. Wayland has no double click, and
+                // inventing a threshold would ignore the user's settings.
+                PointerEventKind::Release { button: BTN_LEFT, .. } => {
+                    let row = self.options.layout.row_at(event.position.1);
+                    if row.is_some() && row == self.pressed.take()
+                        && let Some(rank) = row.and_then(|row| self.rank_at(row))
+                    {
+                        self.accept_rank(rank);
+                    }
+                }
+                PointerEventKind::Axis { vertical, .. } => {
+                    let steps = self.wheel.steps(
+                        vertical.value120,
+                        vertical.discrete,
+                        vertical.absolute,
+                        self.options.layout.row as f64,
+                    );
+                    if steps != 0 {
+                        let count = self.matcher.counts().0;
+                        self.move_by(steps, count);
+                    }
                 }
                 _ => {}
             }

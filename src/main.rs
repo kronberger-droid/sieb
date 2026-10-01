@@ -1,3 +1,4 @@
+mod layout;
 mod matcher;
 mod picker;
 mod render;
@@ -72,9 +73,10 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
 
     let options = window::Options {
         prompt: cli.prompt,
-        lines: cli.lines,
         index: cli.index,
         font: cli.font,
+        layout: layout::Layout::new(640, cli.lines, 15.0, 10.0),
+        theme: render::Theme::default(),
     };
     match window::run(options, matcher, wake) {
         Ok(window::Outcome::Accept(line)) => {
