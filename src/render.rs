@@ -263,6 +263,33 @@ mod tests {
         );
     }
 
+    /// `cargo test -- --ignored --nocapture` prints the cost of one frame.
+    #[test]
+    #[ignore = "needs system fonts"]
+    fn frame_time() {
+        let mut text = Text::load("sans-serif").unwrap();
+        let scale = 1.5;
+        let (w, h) = panel_size(10);
+        let (w, h) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
+        let mut canvas = vec![0; (w * h * 4) as usize];
+        let rows: Vec<_> = (0..10)
+            .map(|i| (["src/window.rs", "Cargo.toml", "flake.nix"][i % 3], vec![0, 2, 4]))
+            .collect();
+        let view = View {
+            prompt: Some("run"),
+            query: "swr",
+            rows,
+            selected: Some(2),
+            matched: 120,
+            total: 4000,
+        };
+        // The first frame fills the glyph cache.
+        panel(&mut canvas, w, h, scale, &mut text, &view);
+        let start = std::time::Instant::now();
+        panel(&mut canvas, w, h, scale, &mut text, &view);
+        eprintln!("frame at {w}x{h} in {:?}", start.elapsed());
+    }
+
     #[test]
     fn highlight_caps_long_lines() {
         let line = "x".repeat(MAX_GRAPHEMES * 2);

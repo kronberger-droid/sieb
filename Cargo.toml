@@ -20,3 +20,12 @@ unicode-segmentation = "1"
 lto = true
 codegen-units = 1
 strip = true
+
+# A frame is per-pixel work (shaping, rasterizing, blending), and at
+# opt-level 0 a debug frame took 41ms against 3ms in release: visible lag
+# while typing.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
