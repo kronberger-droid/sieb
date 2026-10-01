@@ -15,6 +15,9 @@ pub struct Matcher {
     nucleo: Nucleo<Entry>,
     case: CaseMatching,
     query: String,
+    /// Separate from the worker's matchers: recomputes match positions for
+    /// the handful of visible rows on the UI thread.
+    highlighter: nucleo::Matcher,
 }
 
 impl Matcher {
@@ -25,6 +28,7 @@ impl Matcher {
             nucleo: Nucleo::new(Config::DEFAULT, notify, None, 1),
             case,
             query: String::new(),
+            highlighter: nucleo::Matcher::new(Config::DEFAULT),
         }
     }
 
@@ -45,6 +49,44 @@ impl Matcher {
     /// Waits up to `timeout_ms` for the workers and refreshes the snapshot.
     pub fn tick(&mut self, timeout_ms: u64) -> Status {
         self.nucleo.tick(timeout_ms)
+    }
+
+    /// `(matched, total)` as of the last [`Matcher::tick`].
+    pub fn counts(&self) -> (u32, u32) {
+        let snapshot = self.nucleo.snapshot();
+        (snapshot.matched_item_count(), snapshot.item_count())
+    }
+
+    /// The match at `rank`, as of the last [`Matcher::tick`].
+    pub fn get(&self, rank: u32) -> Option<&Entry> {
+        self.nucleo
+            .snapshot()
+            .get_matched_item(rank)
+            .map(|item| item.data)
+    }
+
+    /// Up to `len` matches starting at `start`, each with the sorted
+    /// grapheme indices that matched the query.
+    pub fn window(&mut self, start: u32, len: u32) -> Vec<(&Entry, Vec<u32>)> {
+        let snapshot = self.nucleo.snapshot();
+        let end = (start + len).min(snapshot.matched_item_count());
+        let start = start.min(end);
+        let pattern = snapshot.pattern().column_pattern(0);
+        snapshot
+            .matched_items(start..end)
+            .map(|item| {
+                let mut indices = Vec::new();
+                pattern.indices(
+                    item.matcher_columns[0].slice(..),
+                    &mut self.highlighter,
+                    &mut indices,
+                );
+                // One run per atom, appended as is: sort and dedup.
+                indices.sort_unstable();
+                indices.dedup();
+                (item.data, indices)
+            })
+            .collect()
     }
 
     /// Matches in rank order, as of the last [`Matcher::tick`].

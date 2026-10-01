@@ -1,5 +1,7 @@
 mod matcher;
+mod picker;
 mod render;
+mod text;
 mod window;
 
 use std::io::{self, BufReader, BufWriter, Write};
@@ -27,12 +29,16 @@ struct Cli {
     insensitive: bool,
 
     /// Number of visible lines
-    #[arg(short, long)]
-    lines: Option<u16>,
+    #[arg(short, long, default_value_t = 10)]
+    lines: u32,
 
     /// Print the index of the selection instead of its text
     #[arg(long)]
     index: bool,
+
+    /// Font family, resolved through fontconfig
+    #[arg(long, default_value = "sans-serif")]
+    font: String,
 
     /// Print all matches for QUERY without opening a window
     #[arg(short, long, value_name = "QUERY")]
@@ -47,19 +53,43 @@ fn main() -> ExitCode {
     } else {
         CaseMatching::Smart
     };
-    let mut matcher = Matcher::new(case, Arc::new(|| {}));
 
-    let Some(query) = cli.filter else {
-        return match window::run() {
-            Ok(window::Outcome::Cancel) => ExitCode::FAILURE,
-            Err(err) => {
-                eprintln!("sieb: {err}");
-                ExitCode::from(2)
-            }
-        };
+    match &cli.filter {
+        Some(query) => filter(case, query, cli.index),
+        None => pick(case, cli),
+    }
+}
+
+fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
+    let (wake, notify) = match window::wake() {
+        Ok(pair) => pair,
+        Err(err) => return fail(err),
     };
+    let matcher = Matcher::new(case, notify);
+    // Started before the window, so input streams in while it maps. Read
+    // errors just end the list; there is no one to report them to mid-pick.
+    let _ = matcher::spawn_reader(BufReader::new(io::stdin()), matcher.injector());
 
-    matcher.set_query(&query);
+    let options = window::Options {
+        prompt: cli.prompt,
+        lines: cli.lines,
+        index: cli.index,
+        font: cli.font,
+    };
+    match window::run(options, matcher, wake) {
+        Ok(window::Outcome::Accept(line)) => {
+            let mut out = io::stdout().lock();
+            let _ = writeln!(out, "{line}");
+            ExitCode::SUCCESS
+        }
+        Ok(window::Outcome::Cancel) => ExitCode::FAILURE,
+        Err(err) => fail(err),
+    }
+}
+
+fn filter(case: CaseMatching, query: &str, index: bool) -> ExitCode {
+    let mut matcher = Matcher::new(case, Arc::new(|| {}));
+    matcher.set_query(query);
     let reader = matcher::spawn_reader(BufReader::new(io::stdin()), matcher.injector());
     // The worker going idle only means it caught up with what was injected so
     // far, so wait for EOF before draining it.
@@ -73,7 +103,7 @@ fn main() -> ExitCode {
     let mut matched = false;
     for entry in matcher.matches() {
         matched = true;
-        let res = if cli.index {
+        let res = if index {
             writeln!(out, "{}", entry.index)
         } else {
             writeln!(out, "{}", entry.text)
@@ -90,4 +120,9 @@ fn main() -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+fn fail(err: impl std::fmt::Display) -> ExitCode {
+    eprintln!("sieb: {err}");
+    ExitCode::from(2)
 }

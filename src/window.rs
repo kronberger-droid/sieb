@@ -2,13 +2,19 @@
 //! clicks outside the panel, with the panel itself as a subsurface on top.
 
 use std::error::Error;
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
     output::{OutputHandler, OutputState},
     reexports::{
-        calloop::{EventLoop, LoopHandle},
+        calloop::{
+            EventLoop, LoopHandle,
+            ping::{PingSource, make_ping},
+        },
         calloop_wayland_source::WaylandSource,
         client::{
             Connection, Dispatch, QueueHandle, delegate_noop,
@@ -47,17 +53,51 @@ use smithay_client_toolkit::{
     subcompositor::SubcompositorState,
 };
 
-use crate::render;
+use crate::matcher::Matcher;
+use crate::picker::{Accept, Picker};
+use crate::render::{self, View};
+use crate::text::Text;
 
-/// Logical size of the panel until it is derived from content.
-const PANEL_SIZE: (u32, u32) = (640, 360);
+pub struct Options {
+    pub prompt: Option<String>,
+    pub lines: u32,
+    pub index: bool,
+    pub font: String,
+}
 
 /// How the window was closed.
 pub enum Outcome {
     Cancel,
+    /// Print this and exit 0.
+    Accept(String),
 }
 
-pub fn run() -> Result<Outcome, Box<dyn Error>> {
+/// Wakes the event loop when the matcher has new results.
+pub struct Wake {
+    pending: Arc<AtomicBool>,
+    source: PingSource,
+}
+
+/// The notify callback for [`Matcher::new`] and the event source it wakes.
+///
+/// nucleo calls notify for every pushed line, so a plain ping would cost one
+/// eventfd write per input line. The flag collapses those into one wakeup
+/// until the UI has picked the results up.
+pub fn wake() -> io::Result<(Wake, Arc<dyn Fn() + Send + Sync>)> {
+    let (ping, source) = make_ping()?;
+    let pending = Arc::new(AtomicBool::new(false));
+    let flag = pending.clone();
+    let notify = Arc::new(move || {
+        if !flag.swap(true, Ordering::AcqRel) {
+            ping.ping();
+        }
+    });
+    Ok((Wake { pending, source }, notify))
+}
+
+pub fn run(options: Options, matcher: Matcher, wake: Wake) -> Result<Outcome, Box<dyn Error>> {
+    let text = Text::load(&options.font)?;
+
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
@@ -95,7 +135,9 @@ pub fn run() -> Result<Outcome, Box<dyn Error>> {
     // configure carrying the output size, and the first frame follows that.
     layer.commit();
 
-    let pool = SlotPool::new(PANEL_SIZE.0 as usize * PANEL_SIZE.1 as usize * 4, &shm)?;
+    let panel_size = render::panel_size(options.lines);
+    // Room for two buffers at scale 2 before the pool has to grow.
+    let pool = SlotPool::new(panel_size.0 as usize * panel_size.1 as usize * 4 * 8, &shm)?;
     let mut app = App {
         registry: RegistryState::new(&globals),
         seats: SeatState::new(&globals, &qh),
@@ -103,6 +145,7 @@ pub fn run() -> Result<Outcome, Box<dyn Error>> {
         shm,
         pool,
         loop_handle: event_loop.handle(),
+        qh: qh.clone(),
         cursor_shapes: CursorShapeManager::bind(&globals, &qh).ok(),
 
         layer,
@@ -112,7 +155,15 @@ pub fn run() -> Result<Outcome, Box<dyn Error>> {
         panel_subsurface,
         panel_viewport,
         panel_buffer: None,
+        panel_size,
         fractional,
+
+        picker: Picker::new(options.lines),
+        options,
+        matcher,
+        text,
+        frame_pending: false,
+        dirty: false,
 
         size: None,
         scale: 1.0,
@@ -123,6 +174,16 @@ pub fn run() -> Result<Outcome, Box<dyn Error>> {
         outcome: None,
     };
 
+    let pending = wake.pending;
+    event_loop
+        .handle()
+        .insert_source(wake.source, move |(), _, app: &mut App| {
+            // Clear before ticking, so results landing during the tick ping
+            // again instead of getting lost.
+            pending.store(false, Ordering::Release);
+            app.refresh();
+        })
+        .map_err(|err| err.error)?;
     WaylandSource::new(conn, event_queue).insert(event_loop.handle())?;
     while app.outcome.is_none() {
         event_loop.dispatch(None, &mut app)?;
@@ -137,6 +198,7 @@ struct App {
     shm: Shm,
     pool: SlotPool,
     loop_handle: LoopHandle<'static, App>,
+    qh: QueueHandle<App>,
     cursor_shapes: Option<CursorShapeManager>,
 
     layer: LayerSurface,
@@ -147,7 +209,17 @@ struct App {
     panel_viewport: WpViewport,
     // Held so the slot stays alive while the compositor may still read it.
     panel_buffer: Option<Buffer>,
+    panel_size: (u32, u32),
     fractional: Option<WpFractionalScaleV1>,
+
+    options: Options,
+    matcher: Matcher,
+    picker: Picker,
+    text: Text,
+    /// A frame callback is outstanding; draw again when it fires.
+    frame_pending: bool,
+    /// Something changed since the last draw.
+    dirty: bool,
 
     /// Logical output size, known after the first configure.
     size: Option<(u32, u32)>,
@@ -163,15 +235,100 @@ impl App {
     fn set_scale(&mut self, scale: f64) {
         if scale != self.scale {
             self.scale = scale;
-            self.draw();
+            self.redraw();
         }
     }
 
+    /// Picks up new matcher results.
+    fn refresh(&mut self) {
+        let status = self.matcher.tick(0);
+        self.picker.clamp(self.matcher.counts().0);
+        if status.changed {
+            self.redraw();
+        }
+    }
+
+    fn query_changed(&mut self) {
+        self.matcher.set_query(self.picker.query());
+        // Starts the worker on the new pattern; results arrive via notify.
+        self.refresh();
+        self.redraw();
+    }
+
     fn key(&mut self, event: KeyEvent) {
-        let cancel = event.keysym == Keysym::Escape
-            || (self.modifiers.ctrl && matches!(event.keysym, Keysym::c | Keysym::g));
-        if cancel {
-            self.outcome = Some(Outcome::Cancel);
+        let ctrl = self.modifiers.ctrl;
+        let count = self.matcher.counts().0;
+        // Letters compare both cases, since Caps Lock uppercases the keysym.
+        let is = |lower: Keysym, upper: Keysym| {
+            ctrl && (event.keysym == lower || event.keysym == upper)
+        };
+
+        match event.keysym {
+            Keysym::Escape => self.outcome = Some(Outcome::Cancel),
+            _ if is(Keysym::c, Keysym::C) || is(Keysym::g, Keysym::G) => {
+                self.outcome = Some(Outcome::Cancel)
+            }
+            Keysym::Return | Keysym::KP_Enter => {
+                let accept = self.picker.accept(count, self.modifiers.shift);
+                self.outcome = Some(Outcome::Accept(self.output(accept)));
+            }
+            Keysym::Up | Keysym::KP_Up | Keysym::ISO_Left_Tab => self.move_by(-1, count),
+            Keysym::Down | Keysym::KP_Down | Keysym::Tab => self.move_by(1, count),
+            _ if is(Keysym::p, Keysym::P) || is(Keysym::k, Keysym::K) => self.move_by(-1, count),
+            _ if is(Keysym::n, Keysym::N) || is(Keysym::j, Keysym::J) => self.move_by(1, count),
+            Keysym::Page_Up | Keysym::KP_Page_Up => {
+                self.picker.page(-1, count);
+                self.redraw();
+            }
+            Keysym::Page_Down | Keysym::KP_Page_Down => {
+                self.picker.page(1, count);
+                self.redraw();
+            }
+            Keysym::BackSpace if ctrl => self.edit(Picker::delete_word),
+            Keysym::BackSpace => self.edit(Picker::backspace),
+            _ if is(Keysym::w, Keysym::W) => self.edit(Picker::delete_word),
+            _ if is(Keysym::u, Keysym::U) => self.edit(Picker::clear),
+            _ if !ctrl && !self.modifiers.alt => {
+                if let Some(text) = &event.utf8
+                    && self.picker.insert(text)
+                {
+                    self.query_changed();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn move_by(&mut self, delta: i64, count: u32) {
+        self.picker.move_by(delta, count);
+        self.redraw();
+    }
+
+    fn edit(&mut self, f: fn(&mut Picker) -> bool) {
+        if f(&mut self.picker) {
+            self.query_changed();
+        }
+    }
+
+    fn output(&self, accept: Accept) -> String {
+        match (accept, self.options.index) {
+            (Accept::Match(rank), index) => match self.matcher.get(rank) {
+                Some(entry) if index => entry.index.to_string(),
+                Some(entry) => entry.text.clone(),
+                None => String::new(),
+            },
+            // Typed text has no position in the input. -1 like rofi.
+            (Accept::Query, true) => "-1".into(),
+            (Accept::Query, false) => self.picker.query().to_owned(),
+        }
+    }
+
+    /// Draws now, or once the compositor wants the next frame. Keeps a
+    /// fast stdin from rendering more often than the display refreshes.
+    fn redraw(&mut self) {
+        self.dirty = true;
+        if !self.frame_pending {
+            self.draw();
         }
     }
 
@@ -180,10 +337,27 @@ impl App {
         let Some((width, height)) = self.size else {
             return;
         };
-        let (pw, ph) = (PANEL_SIZE.0.min(width), PANEL_SIZE.1.min(height));
+        self.dirty = false;
+        let (pw, ph) = (self.panel_size.0.min(width), self.panel_size.1.min(height));
         // Buffer sizes round half away from zero, as wp_fractional_scale asks.
         let bw = (pw as f64 * self.scale).round() as i32;
         let bh = (ph as f64 * self.scale).round() as i32;
+
+        let (matched, total) = self.matcher.counts();
+        let scroll = self.picker.scroll();
+        let selected = (matched > 0).then(|| (self.picker.selected() - scroll) as usize);
+        let rows = self.matcher.window(scroll, self.picker.lines());
+        let view = View {
+            prompt: self.options.prompt.as_deref(),
+            query: self.picker.query(),
+            rows: rows
+                .into_iter()
+                .map(|(entry, indices)| (entry.text.as_str(), indices))
+                .collect(),
+            selected,
+            matched,
+            total,
+        };
 
         let (buffer, canvas) = self
             .pool
@@ -192,7 +366,7 @@ impl App {
         // Slots are rounded up to 64 byte alignment, so the canvas can be
         // longer than the buffer it backs.
         let canvas = &mut canvas[..(bw * bh * 4) as usize];
-        render::panel(canvas, bw as u32, bh as u32, self.scale as f32);
+        render::panel(canvas, bw as u32, bh as u32, self.scale as f32, &mut self.text, &view);
         self.panel_viewport.set_destination(pw as i32, ph as i32);
         buffer.attach_to(&self.panel).expect("attach panel buffer");
         self.panel.damage_buffer(0, 0, bw, bh);
@@ -216,6 +390,9 @@ impl App {
         }
         self.backdrop_viewport
             .set_destination(width as i32, height as i32);
+        // Every draw commits the parent, so that is where the callback goes.
+        backdrop.frame(&self.qh, FrameCallbackData(backdrop.clone()));
+        self.frame_pending = true;
         // The panel is a synced subsurface, so its commit above only becomes
         // visible here, together with the backdrop. No half-drawn first frame.
         self.layer.commit();
@@ -243,6 +420,7 @@ impl LayerShellHandler for App {
             return;
         }
         self.size = Some((width, height));
+        // A configure must be answered with a commit, frame callback or not.
         self.draw();
     }
 }
@@ -289,6 +467,10 @@ impl CompositorHandler for App {
     }
 
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
+        self.frame_pending = false;
+        if self.dirty {
+            self.draw();
+        }
     }
 
     fn surface_enter(
