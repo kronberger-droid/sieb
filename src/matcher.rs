@@ -1,6 +1,7 @@
 use std::io::{self, BufRead};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Injector, Nucleo, Status};
@@ -49,6 +50,13 @@ impl Matcher {
     /// Waits up to `timeout_ms` for the workers and refreshes the snapshot.
     pub fn tick(&mut self, timeout_ms: u64) -> Status {
         self.nucleo.tick(timeout_ms)
+    }
+
+    /// Waits until the worker has ranked the current query, up to `budget`.
+    /// A stdin that is still streaming can keep it busy indefinitely.
+    pub fn settle(&mut self, budget: Duration) {
+        let start = Instant::now();
+        while self.tick(10).running && start.elapsed() < budget {}
     }
 
     /// `(matched, total)` as of the last [`Matcher::tick`].

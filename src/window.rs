@@ -5,6 +5,7 @@ use std::error::Error;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
@@ -269,6 +270,11 @@ impl App {
                 self.outcome = Some(Outcome::Cancel)
             }
             Keysym::Return | Keysym::KP_Enter => {
+                // Right after typing, the snapshot may still rank the previous
+                // query, and Enter would pick from the wrong list.
+                self.matcher.settle(Duration::from_millis(150));
+                let count = self.matcher.counts().0;
+                self.picker.clamp(count);
                 let accept = self.picker.accept(count, self.modifiers.shift);
                 self.outcome = Some(Outcome::Accept(self.output(accept)));
             }
