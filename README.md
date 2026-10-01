@@ -118,34 +118,35 @@ Ctrl+Tab and Ctrl+Shift+Tab, Shift+Left and Shift+Right, or a click on a
 button switch modes. The new mode starts with its initial call, and the
 query carries over.
 
-### contrib
+### Examples
 
-The scripts and themes rebuild a rofi setup: a launcher with four modes
-and a power menu.
+[`examples/`](examples) rebuilds a rofi setup in nu scripts: a launcher
+with four modes and a power menu. Scripts that only work under one
+compositor live in a folder named after it.
 
-- [`drun.nu`](contrib/drun.nu) launches apps from XDG desktop entries,
-  the most used first. Typed text that matches no app runs as a command.
-- [`run.nu`](contrib/run.nu) runs a program from `PATH`, or the typed
-  command line.
-- [`files.nu`](contrib/files.nu) browses directories and opens files with
-  `xdg-open`.
-- [`window.nu`](contrib/window.nu) focuses a niri window.
-- [`power.nu`](contrib/power.nu) locks, suspends, logs out, hibernates,
-  reboots or shuts down, the last five after a confirmation.
-- [`launcher.toml`](contrib/launcher.toml) and
-  [`power.toml`](contrib/power.toml) are the themes for those.
-- [`config.toml`](contrib/config.toml) lists every config key with its
+- [`launcher/`](examples/launcher) works under any compositor.
+  - `drun.nu` launches apps from XDG desktop entries, the most used
+    first. Typed text that matches no app runs as a command.
+  - `run.nu` runs a program from `PATH`, or the typed command line.
+  - `files.nu` browses directories and opens files with `xdg-open`.
+  - `launcher.toml` is the theme.
+- [`power/`](examples/power) locks, suspends, logs out, hibernates,
+  reboots or shuts down, the last five after a confirmation. Logout knows
+  niri and sway; the rest works anywhere. `power.toml` is the theme.
+- [`niri/`](examples/niri) needs niri.
+  - `window.nu` focuses a window, as a fourth launcher mode.
+- [`config.toml`](examples/config.toml) lists every config key with its
   default.
 
 The four launcher modes in one window, labelled with Nerd Font glyphs:
 
 ```nu
-(sieb --config contrib/launcher.toml
-    --script $"\u{f002}:contrib/drun.nu"
-    --script $"\u{f121}:contrib/run.nu"
-    --script $"\u{f07c}:contrib/files.nu"
-    --script $"\u{f2d0}:contrib/window.nu")
-sieb --config contrib/power.toml --script contrib/power.nu
+(sieb --config examples/launcher/launcher.toml
+    --script $"\u{f002}:examples/launcher/drun.nu"
+    --script $"\u{f121}:examples/launcher/run.nu"
+    --script $"\u{f07c}:examples/launcher/files.nu"
+    --script $"\u{f2d0}:examples/niri/window.nu")
+sieb --config examples/power/power.toml --script examples/power/power.nu
 ```
 
 ## Keys
@@ -184,8 +185,8 @@ each part, rows as rounded boxes, a placeholder, a badge pill left of the
 prompt, a scrollbar, and whether the counter and separator show. Colors
 left unset follow a related one, so `match` follows `accent` and
 `selected-text` follows `text`. See
-[`contrib/config.toml`](contrib/config.toml) for all keys, and the two
-themes next to it for full examples.
+[`examples/config.toml`](examples/config.toml) for all keys, and the two
+themes in `examples/launcher/` and `examples/power/` for full ones.
 
 ## License
 

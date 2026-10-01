@@ -1,7 +1,7 @@
 #!/usr/bin/env nu
 # File browser, after rofi's filebrowser mode:
 #
-#     sieb --config contrib/launcher.toml --script contrib/files.nu
+#     sieb --config examples/launcher/launcher.toml --script examples/launcher/files.nu
 #
 # Starts in the home directory. Picking a directory lists it, picking a
 # file opens it with xdg-open. Typed text is taken as a path, relative to

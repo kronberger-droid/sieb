@@ -1,7 +1,7 @@
 # Theme for power.nu, after rofi's powermenu style-1 with a base16
 # "default dark" palette:
 #
-#     sieb --config contrib/power.toml --script contrib/power.nu
+#     sieb --config examples/power/power.toml --script examples/power/power.nu
 
 font = "JetBrainsMono Nerd Font"
 font-size = 13.333        # 10pt

@@ -1,7 +1,8 @@
 #!/usr/bin/env nu
-# Window switcher for niri, after rofi's window mode:
+# Window switcher, after rofi's window mode. Compositor: niri only, since
+# it lists and focuses windows through `niri msg`.
 #
-#     sieb --config contrib/launcher.toml --script contrib/window.nu
+#     sieb --config examples/launcher/launcher.toml --script examples/niri/window.nu
 #
 # Lists the open windows as `workspace · app · title`, most recently
 # focused first, and focuses the pick.

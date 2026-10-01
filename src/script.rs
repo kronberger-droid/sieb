@@ -234,9 +234,9 @@ mod tests {
     #[test]
     fn mode_labels() {
         let mode = |s: &str| s.parse::<Mode>().unwrap();
-        assert_eq!(mode("contrib/drun.nu").label, "drun");
-        let labelled = mode("apps:contrib/drun.nu");
-        assert_eq!((labelled.label.as_str(), labelled.path.to_str()), ("apps", Some("contrib/drun.nu")));
+        assert_eq!(mode("examples/launcher/drun.nu").label, "drun");
+        let labelled = mode("apps:examples/launcher/drun.nu");
+        assert_eq!((labelled.label.as_str(), labelled.path.to_str()), ("apps", Some("examples/launcher/drun.nu")));
         // A colon after a slash belongs to the path.
         assert_eq!(mode("./odd:name.nu").path.to_str(), Some("./odd:name.nu"));
         assert!("apps:".parse::<Mode>().is_err());

@@ -514,10 +514,10 @@ mod tests {
     }
 
     #[test]
-    fn contrib_themes_resolve() {
+    fn example_themes_resolve() {
         for theme in [
-            include_str!("../contrib/launcher.toml"),
-            include_str!("../contrib/power.toml"),
+            include_str!("../examples/launcher/launcher.toml"),
+            include_str!("../examples/power/power.toml"),
         ] {
             let file: Appearance = toml::from_str(theme).unwrap();
             file.resolve().unwrap();
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn example_config_matches_defaults() {
         let file: Appearance =
-            toml::from_str(include_str!("../contrib/config.toml")).unwrap();
+            toml::from_str(include_str!("../examples/config.toml")).unwrap();
         let (font, layout, theme) = file.resolve().unwrap();
         let (dfont, dlayout, dtheme) = Appearance::default().resolve().unwrap();
         assert_eq!(font, dfont);

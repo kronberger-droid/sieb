@@ -1,7 +1,10 @@
 #!/usr/bin/env nu
 # Power menu, after rofi's powermenu.sh:
 #
-#     sieb --config contrib/power.toml --script contrib/power.nu
+#     sieb --config examples/power/power.toml --script examples/power/power.nu
+#
+# Compositor: logout knows niri and sway. Lock uses veila, the rest
+# systemctl, so they work under any compositor.
 #
 # Shows how a script drives sieb: called with no argument it prints the
 # first menu, called with the picked entry it either prints a follow-up

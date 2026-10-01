@@ -1,7 +1,7 @@
 #!/usr/bin/env nu
 # Command runner, after rofi's run mode:
 #
-#     sieb --config contrib/launcher.toml --script contrib/run.nu
+#     sieb --config examples/launcher/launcher.toml --script examples/launcher/run.nu
 #
 # Lists the programs on PATH and runs the pick. Typed text runs as a
 # shell command, so arguments work too.

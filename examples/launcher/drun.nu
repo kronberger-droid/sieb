@@ -1,5 +1,5 @@
 #!/usr/bin/env nu
-# App launcher for `sieb --script contrib/drun.nu`.
+# App launcher for `sieb --script examples/launcher/drun.nu`.
 #
 # Lists the desktop entries in the XDG data dirs and launches the pick.
 # Typed text that matches no app runs as a shell command instead.
