@@ -666,7 +666,11 @@ impl App {
             query: self.picker.query(),
             rows: rows
                 .into_iter()
-                .map(|(entry, indices)| (entry.text.as_str(), indices))
+                .map(|(entry, indices)| render::RowView {
+                    text: &entry.text,
+                    styles: &entry.styles,
+                    indices,
+                })
                 .collect(),
             selected,
             scroll,

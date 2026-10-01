@@ -2,8 +2,11 @@ use cosmic_text::Color as TextColor;
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Transform};
 use unicode_segmentation::UnicodeSegmentation;
 
+use std::ops::Range;
+
 use crate::layout::Layout;
-use crate::text::{Canvas, Clip, Text};
+use crate::markup::Style;
+use crate::text::{Canvas, Clip, Span, Text};
 
 /// Display cap per row. `Wrap::None` still shapes the whole line, so one
 /// minified JSON blob on stdin would otherwise stall every frame.
@@ -115,14 +118,22 @@ pub struct View<'a> {
     pub prompt: Option<&'a str>,
     pub message: Option<&'a str>,
     pub query: &'a str,
-    /// Visible rows with the grapheme indices that matched.
-    pub rows: Vec<(&'a str, Vec<u32>)>,
+    pub rows: Vec<RowView<'a>>,
     /// Index into `rows`.
     pub selected: Option<usize>,
     /// Rank of the first visible row.
     pub scroll: u32,
     pub matched: u32,
     pub total: u32,
+}
+
+/// One visible row.
+pub struct RowView<'a> {
+    pub text: &'a str,
+    /// Styled byte ranges of `text`, from markup.
+    pub styles: &'a [(Range<usize>, Style)],
+    /// Grapheme indices that matched the query.
+    pub indices: Vec<u32>,
 }
 
 /// A horizontal span of the input row, in physical pixels.
@@ -278,12 +289,12 @@ pub fn panel(
         if let (Some(pill), Some(label)) = (pill, label) {
             let x = pill.left + input_padding;
             let clip = clip(pill.left, pill.left + pill.width);
-            text.draw(&mut canvas, x, y, size, clip, [(label, text_color(rgba))]);
+            text.draw(&mut canvas, x, y, size, clip, [plain(label, rgba)]);
         }
     }
     if let (Some(counter), Some(w)) = (&counter, counter_width) {
         let x = right - input_padding - w;
-        let spans = [(counter.as_str(), text_color(c.dim))];
+        let spans = [plain(counter.as_str(), c.dim)];
         text.draw(&mut canvas, x, y, size, clip(x, right), spans);
     }
 
@@ -296,10 +307,10 @@ pub fn panel(
     let query_clip = clip(query_left, query_right);
     if view.query.is_empty() && !theme.placeholder.is_empty() {
         let x = query_left + caret_width + s(1.0);
-        let placeholder = [(theme.placeholder.as_str(), text_color(c.placeholder))];
+        let placeholder = [plain(theme.placeholder.as_str(), c.placeholder)];
         text.draw(&mut canvas, x, y, size, query_clip, placeholder);
     } else {
-        let query = [(view.query, text_color(c.text))];
+        let query = [plain(view.query, c.text)];
         text.draw(&mut canvas, query_left - shift, y, size, query_clip, query);
     }
     let caret_x = (query_left - shift + query_width + s(1.0)).min(query_right - caret_width);
@@ -313,23 +324,31 @@ pub fn panel(
         let x = left + s(layout.message_padding);
         let y = text_top(message_top, message_height);
         let clip = clip(left, right - s(layout.message_padding));
-        text.draw(&mut canvas, x, y, size, clip, [(message, text_color(c.message))]);
+        text.draw(&mut canvas, x, y, size, clip, [plain(message, c.message)]);
     }
 
     // Match list.
     let row_left = left + s(layout.row_padding);
     let row_clip = clip(left, list_right - s(layout.row_padding));
-    for (i, (line, indices)) in view.rows.iter().enumerate() {
+    for (i, row) in view.rows.iter().enumerate() {
         let y = text_top(s(layout.row_top(i)), row_height);
-        let (plain, hit) = if view.selected == Some(i) {
+        let (normal, hit) = if view.selected == Some(i) {
             (c.selected_text, c.selected_match)
         } else {
             (c.text, c.matched)
         };
-        let spans = highlight(line, indices);
-        let spans = spans
-            .iter()
-            .map(|&(span, matched)| (span, text_color(if matched { hit } else { plain })));
+        let spans = highlight(row.text, &row.indices, row.styles);
+        let spans = spans.iter().map(|&(span, matched, style)| {
+            // A markup color yields to the match color, so matches stay
+            // visible, and to the selection's text color.
+            let [r, g, b, a] = match style.color {
+                Some([r, g, b]) if !matched && view.selected != Some(i) => [r, g, b, 0xff],
+                _ if matched => hit,
+                _ => normal,
+            };
+            let a = style.alpha.map_or(a, |alpha| mul(a, alpha));
+            (span, text_color([r, g, b, a]), style)
+        });
         text.draw(&mut canvas, row_left, y, size, row_clip, spans);
     }
 
@@ -347,33 +366,54 @@ fn handle(scroll: u32, lines: u32, matched: u32) -> (f32, f32) {
     (scroll as f32 / room * (1.0 - length), length)
 }
 
-/// Splits `line` into runs of matched and unmatched graphemes. nucleo counts
-/// graphemes for non-ASCII haystacks, so byte or char offsets would put the
-/// highlight on the wrong letters in accented or emoji names.
-fn highlight<'a>(line: &'a str, indices: &[u32]) -> Vec<(&'a str, bool)> {
+/// Splits `line` into runs that share whether they matched and their
+/// markup style. nucleo counts graphemes for non-ASCII haystacks, so byte
+/// or char offsets would put the highlight on the wrong letters in
+/// accented or emoji names.
+fn highlight<'a>(
+    line: &'a str,
+    indices: &[u32],
+    styles: &[(Range<usize>, Style)],
+) -> Vec<(&'a str, bool, Style)> {
+    let style_at = |offset: usize| {
+        styles
+            .iter()
+            .find(|(range, _)| range.contains(&offset))
+            .map_or_else(Style::default, |&(_, style)| style)
+    };
     let mut spans = Vec::new();
     let mut hits = indices.iter().peekable();
     let mut start = 0;
     let mut end = 0;
-    let mut current = None;
+    let mut current: Option<(bool, Style)> = None;
     for (n, (offset, grapheme)) in line.grapheme_indices(true).enumerate() {
         if n == MAX_GRAPHEMES {
             break;
         }
-        let hit = hits.next_if(|&&i| i as usize == n).is_some();
+        let run = (hits.next_if(|&&i| i as usize == n).is_some(), style_at(offset));
         if let Some(prev) = current
-            && prev != hit
+            && prev != run
         {
-            spans.push((&line[start..offset], prev));
+            spans.push((&line[start..offset], prev.0, prev.1));
             start = offset;
         }
-        current = Some(hit);
+        current = Some(run);
         end = offset + grapheme.len();
     }
-    if let Some(hit) = current {
-        spans.push((&line[start..end], hit));
+    if let Some((hit, style)) = current {
+        spans.push((&line[start..end], hit, style));
     }
     spans
+}
+
+/// Text in one color and the default style.
+fn plain(text: &str, rgba: [u8; 4]) -> Span<'_> {
+    (text, text_color(rgba), Style::default())
+}
+
+/// `a * b / 255`, rounded.
+fn mul(a: u8, b: u8) -> u8 {
+    ((a as u32 * b as u32 + 127) / 255) as u8
 }
 
 /// Replaces a rectangle of the RGBA canvas with `color`.
@@ -441,10 +481,18 @@ fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Path {
 mod tests {
     use super::*;
 
+    /// Runs of `highlight` without markup, as (text, matched).
+    fn runs<'a>(line: &'a str, indices: &[u32]) -> Vec<(&'a str, bool)> {
+        highlight(line, indices, &[])
+            .into_iter()
+            .map(|(text, hit, _)| (text, hit))
+            .collect()
+    }
+
     #[test]
     fn highlight_ascii() {
         assert_eq!(
-            highlight("foobar", &[0, 1, 4]),
+            runs("foobar", &[0, 1, 4]),
             [("fo", true), ("ob", false), ("a", true), ("r", false)]
         );
     }
@@ -453,8 +501,22 @@ mod tests {
     fn highlight_counts_graphemes_not_bytes() {
         // "é" as e + combining accent is one grapheme, three bytes.
         assert_eq!(
-            highlight("cafe\u{301} au", &[3, 5]),
+            runs("cafe\u{301} au", &[3, 5]),
             [("caf", false), ("e\u{301}", true), (" ", false), ("a", true), ("u", false)]
+        );
+    }
+
+    #[test]
+    fn highlight_splits_at_style_changes() {
+        let italic = Style {
+            italic: true,
+            ..Style::default()
+        };
+        let spans = highlight("ab cd", &[1, 3], &[(3..5, italic)]);
+        let got: Vec<_> = spans.iter().map(|&(t, hit, s)| (t, hit, s.italic)).collect();
+        assert_eq!(
+            got,
+            [("a", false, false), ("b", true, false), (" ", false, false), ("c", true, true), ("d", false, true)]
         );
     }
 
@@ -470,7 +532,11 @@ mod tests {
         let (w, h) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
         let mut canvas = vec![0; (w * h * 4) as usize];
         let rows: Vec<_> = (0..10)
-            .map(|i| (["src/window.rs", "Cargo.toml", "flake.nix"][i % 3], vec![0, 2, 4]))
+            .map(|i| RowView {
+                text: ["src/window.rs", "Cargo.toml", "flake.nix"][i % 3],
+                styles: &[],
+                indices: vec![0, 2, 4],
+            })
             .collect();
         let view = View {
             prompt: Some("run"),
@@ -509,7 +575,7 @@ mod tests {
     #[test]
     fn highlight_caps_long_lines() {
         let line = "x".repeat(MAX_GRAPHEMES * 2);
-        let spans = highlight(&line, &[]);
+        let spans = highlight(&line, &[], &[]);
         assert_eq!(spans[0].0.len(), MAX_GRAPHEMES);
     }
 }

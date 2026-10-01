@@ -2,8 +2,11 @@
 //! JSON. Shared by stdin and scripts.
 
 use std::io::{self, BufRead};
+use std::ops::Range;
 
 use serde_json::{Map, Value};
+
+use crate::markup::{self, Style};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -35,6 +38,8 @@ pub struct Row {
     /// The JSON object this row came from, printed back on selection so
     /// fields sieb does not know about survive the round trip.
     pub raw: Option<String>,
+    /// Styled byte ranges of `text`, from markup.
+    pub styles: Vec<(Range<usize>, Style)>,
 }
 
 impl Row {
@@ -45,6 +50,17 @@ impl Row {
             meta: None,
             selectable: true,
             raw: None,
+            styles: Vec::new(),
+        }
+    }
+
+    /// Reads the text as markup: tags become styles, entities characters.
+    fn with_markup(self) -> Self {
+        let markup = markup::parse(&self.text);
+        Self {
+            text: markup.text,
+            styles: markup.spans,
+            ..self
         }
     }
 }
@@ -57,19 +73,33 @@ impl Row {
 /// Lines that are not valid UTF-8 are kept with replacement characters
 /// rather than ending the stream, since one odd filename in `fd | sieb`
 /// should not truncate the list.
+///
+/// A `markup-rows` option turns on markup for the rows after it, the way
+/// a rofi script sets it before printing them.
 pub fn feed<R: BufRead>(
     mut reader: R,
     mut format: Format,
     field: Option<&str>,
-    mut sink: impl FnMut(Line),
+    mut out: impl FnMut(Line),
 ) -> io::Result<()> {
+    let mut markup = false;
+    let mut sink = move |line: Line| match line {
+        Line::Mode(key, value) => {
+            if key == "markup-rows" {
+                markup = value == "true";
+            }
+            out(Line::Mode(key, value));
+        }
+        Line::Row(row) if markup => out(Line::Row(row.with_markup())),
+        row => out(row),
+    };
     if format == Format::Json && starts_with(&mut reader, b'[')? {
         // nu's `to json` writes a table as one array, not one line per row.
         let values: Vec<Value> = serde_json::from_reader(reader).map_err(io::Error::other)?;
         values
             .into_iter()
             .flat_map(|value| from_value(value, field))
-            .for_each(sink);
+            .for_each(&mut sink);
         return Ok(());
     }
 
@@ -155,6 +185,7 @@ const MENU_OPTIONS: &[&str] = &[
     "keep-filter",
     "data",
     "new-selection",
+    "markup-rows",
 ];
 
 /// An object with `text` is a row; one made of option keys sets menu
@@ -196,6 +227,7 @@ fn from_value(value: Value, field: Option<&str>) -> Vec<Line> {
         meta: object.get("meta").cloned().map(as_string),
         selectable: object.get("selectable") != Some(&Value::Bool(false)),
         raw: Some(Value::Object(object).to_string()),
+        styles: Vec::new(),
     };
     vec![Line::Row(row)]
 }
@@ -237,8 +269,19 @@ mod tests {
                 meta: Some("halt off".into()),
                 selectable: false,
                 raw: None,
+                styles: vec![],
             })
         );
+    }
+
+    #[test]
+    fn markup_rows_apply_to_later_rows() {
+        let input = "<b>a</b>\n\0markup-rows\x1ftrue\n<b>b</b> &amp; c\n";
+        let lines = all(input, Format::Rofi);
+        assert_eq!(lines[0], row("<b>a</b>"));
+        let Line::Row(r) = &lines[2] else { panic!() };
+        assert_eq!(r.text, "b & c");
+        assert_eq!(r.styles.len(), 1);
     }
 
     #[test]

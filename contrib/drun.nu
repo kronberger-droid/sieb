@@ -57,16 +57,52 @@ def entries [] {
     | sort-by Name
 }
 
+# Launch counts by desktop file, so the apps used most come first, like
+# rofi's drun history.
+def history-file [] {
+    $env.XDG_CACHE_HOME? | default ($env.HOME | path join .cache) | path join sieb drun-history.nuon
+}
+
+def history [] {
+    let file = history-file
+    if ($file | path exists) { try { open $file } catch { {} } } else { {} }
+}
+
+def remember [path: string] {
+    let file = history-file
+    mkdir ($file | path dirname)
+    let counts = history
+    $counts | upsert $path (($counts | get --optional $path | default 0) + 1) | save --force $file
+}
+
+# Text that markup would read as tags or entities.
+def escape [] {
+    str replace --all "&" "&amp;" | str replace --all "<" "&lt;" | str replace --all ">" "&gt;"
+}
+
 def menu [] {
     print "\u{0}prompt\u{1f}\u{f002}"
-    entries | each {|entry|
-        # Matched but not shown: lets "browser" find Firefox.
+    print "\u{0}markup-rows\u{1f}true"
+    let counts = history
+    entries
+    # Ascending on the negated count, since the sort is stable and apps
+    # used equally often then keep their alphabetical order.
+    | insert rank {|entry| 0 - ($counts | get --optional $entry.path | default 0) }
+    | sort-by rank
+    | each {|entry|
+        # rofi's drun-display-format: `{name} [<span weight='light'
+        # size='small'><i>({generic})</i></span>]`.
+        let name = $entry.Name | escape
+        let text = match ($entry.GenericName? | default "") {
+            "" => $name
+            $generic => $"($name) <span weight='light' size='small'><i>\(($generic | escape)\)</i></span>"
+        }
+        # Matched but not shown.
         let meta = [
-            ($entry.GenericName? | default "")
             ($entry.Keywords? | default "" | str replace --all ";" " ")
             (program $entry)
         ] | str join " "
-        print $"($entry.Name)\u{0}info\u{1f}($entry.path)\u{1f}meta\u{1f}($meta)"
+        print $"($text)\u{0}info\u{1f}($entry.path)\u{1f}meta\u{1f}($meta)"
     } | ignore
 }
 
@@ -129,6 +165,7 @@ def main [choice?: string] {
         "0" => { menu }
         "1" => {
             let entry = parse-entry $env.ROFI_INFO
+            remember $env.ROFI_INFO
             launch (argv $entry) $entry.Path?
         }
         # Typed text that is not an app: run it.

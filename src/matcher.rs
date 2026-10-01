@@ -1,4 +1,5 @@
 use std::io::{self, BufRead};
+use std::ops::Range;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -7,6 +8,7 @@ use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Injector, Nucleo, Status};
 
 use crate::format::{self, Format, Line, Row};
+use crate::markup::Style;
 
 /// One input line, with its position in the input stream.
 pub struct Entry {
@@ -17,6 +19,8 @@ pub struct Entry {
     pub selectable: bool,
     /// JSON input: the object this entry came from.
     pub raw: Option<String>,
+    /// Styled byte ranges of `text`, from markup.
+    pub styles: Vec<(Range<usize>, Style)>,
 }
 
 /// Adds a row to the matcher. `meta` is matched but not shown, so it goes
@@ -33,6 +37,7 @@ pub fn push(injector: &Injector<Entry>, index: u32, row: Row) {
         info: row.info,
         selectable: row.selectable,
         raw: row.raw,
+        styles: row.styles,
     };
     injector.push(entry, |_, columns| columns[0] = haystack.as_str().into());
 }

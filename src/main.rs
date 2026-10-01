@@ -1,6 +1,7 @@
 mod config;
 mod format;
 mod layout;
+mod markup;
 mod matcher;
 mod picker;
 mod render;

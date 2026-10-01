@@ -10,7 +10,9 @@ use cosmic_text::fontdb::{self, FaceInfo, Language, Source, Stretch, Style, Weig
 use cosmic_text::{
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Wrap,
 };
-use fontconfig::{Fontconfig, Pattern, UnicodeCoverage};
+use fontconfig::{Fontconfig, ObjectSet, Pattern, UnicodeCoverage, list_fonts};
+
+use crate::markup;
 
 /// A borrowed premultiplied RGBA canvas in physical pixels.
 pub struct Canvas<'a> {
@@ -52,31 +54,7 @@ impl Text {
         let mut db = fontdb::Database::new();
         let mut seen = HashSet::new();
         for font in sorted.iter() {
-            let (Ok(file), Ok(name)) = (font.filename(), font.get_string(c"family")) else {
-                continue;
-            };
-            let index = font.face_index().unwrap_or(0) as u32;
-            if !seen.insert((file.to_owned(), index)) {
-                continue;
-            }
-            db.push_face_info(FaceInfo {
-                id: fontdb::ID::dummy(),
-                source: Source::File(PathBuf::from(file)),
-                index,
-                families: vec![(name.to_owned(), Language::English_UnitedStates)],
-                post_script_name: font
-                    .get_string(c"postscriptname")
-                    .unwrap_or_default()
-                    .to_owned(),
-                style: match font.slant() {
-                    Ok(FC_SLANT_ITALIC) => Style::Italic,
-                    Ok(FC_SLANT_OBLIQUE) => Style::Oblique,
-                    _ => Style::Normal,
-                },
-                weight: Weight(font.weight().map_or(400, opentype_weight)),
-                stretch: font.width().map_or(Stretch::Normal, stretch),
-                monospaced: font.get_int(c"spacing").is_ok_and(|s| s >= FC_MONO),
-            });
+            register(&mut db, &mut seen, &font);
         }
         // The family fontconfig resolved, not the configured name: aliases
         // like "sans-serif" would otherwise hit cosmic-text's own generic
@@ -88,6 +66,27 @@ impl Text {
             .map(|(name, _)| name.clone())
             .ok_or_else(|| format!("no font found for {family:?}"))?;
 
+        // The sort trims faces that add no new characters, which drops the
+        // italic and light faces of the family itself. Markup needs those.
+        let mut pattern = Pattern::new(&fc)?;
+        pattern.add_string(c"family", &CString::new(family.as_str())?)?;
+        let mut objects = ObjectSet::new(&fc)?;
+        for object in [
+            c"family",
+            c"file",
+            c"index",
+            c"slant",
+            c"weight",
+            c"width",
+            c"spacing",
+            c"postscriptname",
+        ] {
+            objects.add(object)?;
+        }
+        for font in list_fonts(&pattern, Some(&objects))?.iter() {
+            register(&mut db, &mut seen, &font);
+        }
+
         Ok(Self {
             fonts: FontSystem::new_with_locale_and_db("en-US".into(), db),
             glyphs: SwashCache::new(),
@@ -95,24 +94,30 @@ impl Text {
         })
     }
 
-    fn shape<'s>(&mut self, size: f32, spans: impl IntoIterator<Item = (&'s str, Color)>) -> Buffer {
-        let metrics = Metrics::new(size, (size * 1.25).ceil());
+    fn shape<'s>(&mut self, size: f32, spans: impl IntoIterator<Item = Span<'s>>) -> Buffer {
+        let metrics = Metrics::new(size, Self::line_height(size));
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         buffer.set_wrap(Wrap::None);
         let attrs = Attrs::new().family(Family::Name(&self.family));
-        buffer.set_rich_text(
-            spans.into_iter().map(|(s, color)| (s, attrs.clone().color(color))),
-            &attrs,
-            Shaping::Advanced,
-            None,
-        );
+        let spans = spans.into_iter().map(|(s, color, style)| {
+            let mut span = attrs.clone().color(color).weight(Weight(style.weight));
+            if style.italic {
+                span = span.style(Style::Italic);
+            }
+            if style.scale != 1.0 {
+                let size = size * style.scale;
+                span = span.metrics(Metrics::new(size, Self::line_height(size)));
+            }
+            (s, span)
+        });
+        buffer.set_rich_text(spans, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.fonts, false);
         buffer
     }
 
     /// Width of `text` in physical pixels.
     pub fn width(&mut self, size: f32, text: &str) -> f32 {
-        let buffer = self.shape(size, [(text, Color(0))]);
+        let buffer = self.shape(size, [(text, Color(0), markup::Style::default())]);
         buffer.layout_runs().map(|run| run.line_w).fold(0.0, f32::max)
     }
 
@@ -121,7 +126,7 @@ impl Text {
         (size * 1.25).ceil()
     }
 
-    /// Draws one line of differently colored spans with its line box's top
+    /// Draws one line of differently styled spans with its line box's top
     /// left corner at (`x`, `y`). Returns the advance width.
     pub fn draw<'s>(
         &mut self,
@@ -130,7 +135,7 @@ impl Text {
         y: f32,
         size: f32,
         clip: Clip,
-        spans: impl IntoIterator<Item = (&'s str, Color)>,
+        spans: impl IntoIterator<Item = Span<'s>>,
     ) -> f32 {
         let buffer = self.shape(size, spans);
         let mut width: f32 = 0.0;
@@ -148,6 +153,38 @@ impl Text {
         }
         width
     }
+}
+
+/// Text with the color and style to draw it in.
+pub type Span<'s> = (&'s str, Color, markup::Style);
+
+/// Adds one face fontconfig found, from its metadata alone.
+fn register(db: &mut fontdb::Database, seen: &mut HashSet<(String, u32)>, font: &Pattern) {
+    let (Ok(file), Ok(name)) = (font.filename(), font.get_string(c"family")) else {
+        return;
+    };
+    let index = font.face_index().unwrap_or(0) as u32;
+    if !seen.insert((file.to_owned(), index)) {
+        return;
+    }
+    db.push_face_info(FaceInfo {
+        id: fontdb::ID::dummy(),
+        source: Source::File(PathBuf::from(file)),
+        index,
+        families: vec![(name.to_owned(), Language::English_UnitedStates)],
+        post_script_name: font
+            .get_string(c"postscriptname")
+            .unwrap_or_default()
+            .to_owned(),
+        style: match font.slant() {
+            Ok(FC_SLANT_ITALIC) => Style::Italic,
+            Ok(FC_SLANT_OBLIQUE) => Style::Oblique,
+            _ => Style::Normal,
+        },
+        weight: Weight(font.weight().map_or(400, opentype_weight)),
+        stretch: font.width().map_or(Stretch::Normal, stretch),
+        monospaced: font.get_int(c"spacing").is_ok_and(|s| s >= FC_MONO),
+    });
 }
 
 const FC_SLANT_ITALIC: i32 = 100;
@@ -271,7 +308,8 @@ mod tests {
 
         // Fallback has to reach fonts that are registered but never parsed.
         let start = std::time::Instant::now();
-        let buffer = text.shape(15.0, [("日本語 🦀 café", Color(0))]);
+        let plain = markup::Style::default();
+        let buffer = text.shape(15.0, [("日本語 🦀 café", Color(0), plain)]);
         let tofu = buffer
             .layout_runs()
             .flat_map(|run| run.glyphs)
