@@ -9,6 +9,8 @@ license = "MIT"
 clap = { version = "4.6", features = ["derive"] }
 nucleo = "0.5.0"
 serde = { version = "1", features = ["derive"] }
+smithay-client-toolkit = "0.21"
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 toml = "1.1"
 
 [profile.release]

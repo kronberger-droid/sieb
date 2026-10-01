@@ -1,4 +1,6 @@
 mod matcher;
+mod render;
+mod window;
 
 use std::io::{self, BufReader, BufWriter, Write};
 use std::process::ExitCode;
@@ -48,8 +50,13 @@ fn main() -> ExitCode {
     let mut matcher = Matcher::new(case, Arc::new(|| {}));
 
     let Some(query) = cli.filter else {
-        eprintln!("sieb: no UI yet, use --filter");
-        return ExitCode::FAILURE;
+        return match window::run() {
+            Ok(window::Outcome::Cancel) => ExitCode::FAILURE,
+            Err(err) => {
+                eprintln!("sieb: {err}");
+                ExitCode::from(2)
+            }
+        };
     };
 
     matcher.set_query(&query);
