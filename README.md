@@ -91,9 +91,15 @@ Shutdown\0info\x1fpoweroff  row with options
 ```
 
 Supported row options are `info`, `meta` and `nonselectable`. Supported
-menu options are `prompt`, `message`, `data`, `no-custom`, `keep-filter`
-and `new-selection`. A script whose first line is `{"sieb": 1}` writes the
-rest as JSON rows instead.
+menu options are `prompt`, `message`, `data`, `no-custom`, `keep-filter`,
+`new-selection` and `markup-rows`. A script whose first line is
+`{"sieb": 1}` writes the rest as JSON rows instead.
+
+With `markup-rows` on, rows are Pango markup, the subset rofi scripts
+use: `<b>`, `<i>`, `<small>`, `<big>`, and `<span>` with `weight`,
+`style`, `size`, `foreground` and `alpha`, plus `&amp;`-style entities.
+Rows match on their text without tags. Markup that does not parse shows
+as written.
 
 Calls after a pick get an `XDG_ACTIVATION_TOKEN` (and the same value as
 `DESKTOP_STARTUP_ID`), so an app the script launches may take focus.
@@ -101,16 +107,45 @@ Calls after a pick get an `XDG_ACTIVATION_TOKEN` (and the same value as
 A script that starts a long-running program has to detach its output,
 since sieb waits for the script's stdout to close.
 
+### Modes
+
+Given more than once, `--script` makes each script a mode, like rofi's
+`-modi`. Each takes an optional label, `LABEL:PATH`. Buttons under the
+list show the modes by label, or by file name without one. A mode's label
+is its prompt unless the script sets one.
+
+Ctrl+Tab and Ctrl+Shift+Tab, Shift+Left and Shift+Right, or a click on a
+button switch modes. The new mode starts with its initial call, and the
+query carries over.
+
 ### contrib
 
-- [`drun.nu`](contrib/drun.nu) launches apps from XDG desktop entries.
-  Typed text that matches no app runs as a command.
-- [`power.nu`](contrib/power.nu) is a power menu with a confirmation step.
+The scripts and themes rebuild a rofi setup: a launcher with four modes
+and a power menu.
+
+- [`drun.nu`](contrib/drun.nu) launches apps from XDG desktop entries,
+  the most used first. Typed text that matches no app runs as a command.
+- [`run.nu`](contrib/run.nu) runs a program from `PATH`, or the typed
+  command line.
+- [`files.nu`](contrib/files.nu) browses directories and opens files with
+  `xdg-open`.
+- [`window.nu`](contrib/window.nu) focuses a niri window.
+- [`power.nu`](contrib/power.nu) locks, suspends, logs out, hibernates,
+  reboots or shuts down, the last five after a confirmation.
+- [`launcher.toml`](contrib/launcher.toml) and
+  [`power.toml`](contrib/power.toml) are the themes for those.
 - [`config.toml`](contrib/config.toml) lists every config key with its
   default.
 
+The four launcher modes in one window, labelled with Nerd Font glyphs:
+
 ```nu
-sieb --script contrib/drun.nu
+(sieb --config contrib/launcher.toml
+    --script $"\u{f002}:contrib/drun.nu"
+    --script $"\u{f121}:contrib/run.nu"
+    --script $"\u{f07c}:contrib/files.nu"
+    --script $"\u{f2d0}:contrib/window.nu")
+sieb --config contrib/power.toml --script contrib/power.nu
 ```
 
 ## Keys
@@ -125,9 +160,10 @@ sieb --script contrib/drun.nu
 | Page Up, Page Down | move a page |
 | Ctrl+W, Ctrl+Backspace | delete a word |
 | Ctrl+U | clear the query |
+| Ctrl+Tab, Shift+Right / Ctrl+Shift+Tab, Shift+Left | next / previous mode |
 
-A click picks a row, a click outside the panel cancels, and the wheel
-scrolls.
+A click picks a row or a mode, a click outside the panel cancels, and the
+wheel scrolls.
 
 ## Config
 
@@ -143,7 +179,13 @@ lines = 12
 accent = "#89b4fa"
 ```
 
-See [`contrib/config.toml`](contrib/config.toml) for all keys.
+Beyond font, size and colors, a theme sets the spacing and padding of
+each part, rows as rounded boxes, a placeholder, a badge pill left of the
+prompt, a scrollbar, and whether the counter and separator show. Colors
+left unset follow a related one, so `match` follows `accent` and
+`selected-text` follows `text`. See
+[`contrib/config.toml`](contrib/config.toml) for all keys, and the two
+themes next to it for full examples.
 
 ## License
 
