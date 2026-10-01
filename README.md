@@ -4,13 +4,11 @@ A dmenu-first picker for Wayland. Lines go in on stdin, the pick comes out
 on stdout. Everything else, like an app launcher or a power menu, is a
 script rather than a built-in mode.
 
-<p align="center">
-  <img src="docs/screenshots/launcher.png" alt="An app launcher with four mode buttons" width="62%">
-  <img src="docs/screenshots/power.png" alt="A power menu showing the host name and uptime" width="34%">
-</p>
+![sieb picking from every line of its own source, streamed in from ripgrep](docs/screenshots/dmenu.png)
 
-The launcher and power menu above are the scripts and themes in
-[`examples/`](examples).
+Above, every line of sieb's own source streams in from ripgrep, as
+[`examples/stream/grep.nu`](examples/stream/grep.nu) does, in the theme
+from [`examples/launcher/`](examples/launcher).
 
 sieb draws its own panel (sctk, tiny-skia, cosmic-text) and streams stdin
 into a [nucleo](https://github.com/helix-editor/nucleo) matcher while the
