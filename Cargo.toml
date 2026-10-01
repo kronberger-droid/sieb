@@ -2,5 +2,15 @@
 name = "sieb"
 version = "0.1.0"
 edition = "2024"
+description = "dmenu-first Wayland picker, extended through scripts"
+license = "MIT"
 
 [dependencies]
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
