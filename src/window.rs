@@ -105,6 +105,10 @@ const STDIN: u32 = u32::MAX;
 #[derive(Default)]
 struct Menu {
     prompt: Option<String>,
+    /// A line of text above the list.
+    message: Option<String>,
+    /// Rank to select when the menu appears.
+    new_selection: Option<u32>,
     /// Typed text that matches nothing cannot be submitted.
     no_custom: bool,
     /// Keep the query when this menu replaces the previous one.
@@ -117,11 +121,13 @@ impl Menu {
     fn set(&mut self, key: &str, value: String) {
         match key {
             "prompt" => self.prompt = Some(value),
+            "message" => self.message = Some(value),
+            "new-selection" => self.new_selection = value.parse().ok(),
             "no-custom" => self.no_custom = value == "true",
             "keep-filter" => self.keep_filter = value == "true",
             "data" => self.data = Some(value),
-            // message, markup-rows, urgent, active, use-hot-keys,
-            // keep-selection, new-selection, delim, theme: not yet.
+            // markup-rows, urgent, active, use-hot-keys, keep-selection,
+            // delim, theme: not yet.
             _ => {}
         }
     }
@@ -529,6 +535,13 @@ impl App {
                 self.picker.clamp(0);
                 self.matcher.set_query(self.picker.query());
                 self.refresh();
+                if let Some(rank) = self.menu.new_selection {
+                    // The script printed its rows before exiting, but they
+                    // may still be in flight: give the matcher a moment so
+                    // a selection near the end has a row to land on.
+                    self.matcher.settle(Duration::from_millis(50));
+                    self.picker.select(rank, self.matcher.counts().0);
+                }
                 self.redraw();
             }
             script::Event::Done { call, status, rows } => {
@@ -596,6 +609,7 @@ impl App {
             return;
         };
         self.dirty = false;
+        self.options.layout.message = self.menu.message.is_some();
         let (pw, ph) = self.options.layout.size();
         let (pw, ph) = (pw.min(width), ph.min(height));
         // Buffer sizes round half away from zero, as wp_fractional_scale asks.
@@ -608,6 +622,7 @@ impl App {
         let rows = self.matcher.window(scroll, self.picker.lines());
         let view = View {
             prompt: self.menu.prompt.as_deref().or(self.options.prompt.as_deref()),
+            message: self.menu.message.as_deref(),
             query: self.picker.query(),
             rows: rows
                 .into_iter()

@@ -47,6 +47,7 @@ impl Default for Theme {
 /// Everything one frame shows, in logical terms.
 pub struct View<'a> {
     pub prompt: Option<&'a str>,
+    pub message: Option<&'a str>,
     pub query: &'a str,
     /// Visible rows with the grapheme indices that matched.
     pub rows: Vec<(&'a str, Vec<u32>)>,
@@ -196,6 +197,11 @@ pub fn panel(
         );
     }
 
+    if let Some(message) = view.message {
+        let y = s(layout.message_top()) + baseline_offset;
+        text.draw(&mut canvas, text_left, y, size, clip, [(message, text_color(theme.dim))]);
+    }
+
     // Match list.
     for (i, (line, indices)) in view.rows.iter().enumerate() {
         let y = s(layout.row_top(i)) + baseline_offset;
@@ -342,6 +348,7 @@ mod tests {
             .collect();
         let view = View {
             prompt: Some("run"),
+            message: None,
             query: "swr",
             rows,
             selected: Some(2),
