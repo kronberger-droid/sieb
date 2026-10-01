@@ -51,14 +51,25 @@ impl Row {
 
 /// Reads `reader` to the end, handing each parsed line to `sink`.
 ///
+/// `field` names the key of a JSON record to show as its text, for input
+/// that was not written with sieb in mind (`ls | to json -r`).
+///
 /// Lines that are not valid UTF-8 are kept with replacement characters
 /// rather than ending the stream, since one odd filename in `fd | sieb`
 /// should not truncate the list.
-pub fn feed<R: BufRead>(mut reader: R, mut format: Format, mut sink: impl FnMut(Line)) -> io::Result<()> {
+pub fn feed<R: BufRead>(
+    mut reader: R,
+    mut format: Format,
+    field: Option<&str>,
+    mut sink: impl FnMut(Line),
+) -> io::Result<()> {
     if format == Format::Json && starts_with(&mut reader, b'[')? {
         // nu's `to json` writes a table as one array, not one line per row.
         let values: Vec<Value> = serde_json::from_reader(reader).map_err(io::Error::other)?;
-        values.into_iter().flat_map(from_value).for_each(sink);
+        values
+            .into_iter()
+            .flat_map(|value| from_value(value, field))
+            .for_each(sink);
         return Ok(());
     }
 
@@ -80,7 +91,7 @@ pub fn feed<R: BufRead>(mut reader: R, mut format: Format, mut sink: impl FnMut(
             Format::Rofi => sink(parse_rofi(&text)),
             Format::Json if text.trim().is_empty() => {}
             Format::Json => match serde_json::from_str::<Value>(&text) {
-                Ok(value) => from_value(value).into_iter().for_each(&mut sink),
+                Ok(value) => from_value(value, field).into_iter().for_each(&mut sink),
                 // Keep the line visible rather than dropping input.
                 Err(_) => sink(Line::Row(Row::plain(text.into_owned()))),
             },
@@ -148,7 +159,9 @@ const MENU_OPTIONS: &[&str] = &[
 
 /// An object with `text` is a row; one made of option keys sets menu
 /// options; a bare string or number is a row of just that.
-fn from_value(value: Value) -> Vec<Line> {
+///
+/// `field` names the key shown as a record's text in place of `text`.
+fn from_value(value: Value, field: Option<&str>) -> Vec<Line> {
     let mut object = match value {
         Value::Object(object) => object,
         Value::Null => return vec![],
@@ -164,16 +177,17 @@ fn from_value(value: Value) -> Vec<Line> {
     };
     // Only an object made of nothing but option keys sets options. Any other
     // object is a row, or `ls | to json` would vanish into ignored options.
-    if !object.contains_key("text") && object.keys().all(|key| MENU_OPTIONS.contains(&key.as_str())) {
+    let shown = field.unwrap_or("text");
+    if !object.contains_key(shown) && object.keys().all(|key| MENU_OPTIONS.contains(&key.as_str())) {
         object.remove("sieb");
         return object
             .into_iter()
             .map(|(key, value)| Line::Mode(key, as_string(value)))
             .collect();
     }
-    let text = match object.get("text") {
+    // A record missing the named field still shows up, as its whole JSON.
+    let text = match object.get(shown).or_else(|| object.get("text")) {
         Some(text) => as_string(text.clone()),
-        // Shown whole until there is a way to name the display field.
         None => Value::Object(object.clone()).to_string(),
     };
     let row = Row {
@@ -200,7 +214,7 @@ mod tests {
 
     fn all(input: &str, format: Format) -> Vec<Line> {
         let mut lines = Vec::new();
-        feed(input.as_bytes(), format, |line| lines.push(line)).unwrap();
+        feed(input.as_bytes(), format, None, |line| lines.push(line)).unwrap();
         lines
     }
 
@@ -275,6 +289,25 @@ not json
             && r.raw.as_deref() == Some(r.text.as_str())));
         // An unknown key next to option keys makes it a row too.
         assert!(matches!(&all(r#"{"prompt":"p","name":"x"}"#, Format::Json)[..], [Line::Row(_)]));
+    }
+
+    #[test]
+    fn named_field_is_shown() {
+        let input = r#"[{"name":"a.rs","size":10},{"text":"t","name":"b.rs"},{"size":3}]"#;
+        let mut lines = Vec::new();
+        feed(input.as_bytes(), Format::Json, Some("name"), |line| lines.push(line)).unwrap();
+        let texts: Vec<_> = lines
+            .iter()
+            .map(|line| match line {
+                Line::Row(r) => r.text.as_str(),
+                Line::Mode(..) => panic!("{line:?}"),
+            })
+            .collect();
+        // The named field wins over `text`; a record without it shows whole.
+        assert_eq!(texts, ["a.rs", "b.rs", r#"{"size":3}"#]);
+        // The whole record still goes back out on selection.
+        assert!(matches!(&lines[0], Line::Row(r)
+            if r.raw.as_deref() == Some(r#"{"name":"a.rs","size":10}"#)));
     }
 
     #[test]

@@ -133,11 +133,13 @@ impl Matcher {
 
 /// Reads lines from `reader` into the matcher on a background thread.
 ///
-/// Menu options in the input (JSON only) go to `on_mode`.
+/// Menu options in the input (JSON only) go to `on_mode`. `field` is the
+/// JSON key shown as each record's text, see [`format::feed`].
 pub fn spawn_reader<R>(
     reader: R,
     injector: Injector<Entry>,
     format: Format,
+    field: Option<String>,
     mut on_mode: impl FnMut(String, String) + Send + 'static,
 ) -> JoinHandle<io::Result<()>>
 where
@@ -145,7 +147,7 @@ where
 {
     thread::spawn(move || {
         let mut index = 0;
-        format::feed(reader, format, |line| match line {
+        format::feed(reader, format, field.as_deref(), |line| match line {
             Line::Mode(key, value) => on_mode(key, value),
             Line::Row(row) => {
                 push(&injector, index, row);
@@ -163,7 +165,7 @@ mod tests {
     fn filter(input: &'static [u8], query: &str) -> Vec<(u32, String)> {
         let mut matcher = Matcher::new(CaseMatching::Smart, Arc::new(|| {}));
         matcher.set_query(query);
-        spawn_reader(Cursor::new(input), matcher.injector(), Format::Plain, |_, _| {})
+        spawn_reader(Cursor::new(input), matcher.injector(), Format::Plain, None, |_, _| {})
             .join()
             .unwrap()
             .unwrap();

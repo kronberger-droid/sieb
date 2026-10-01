@@ -74,6 +74,8 @@ pub struct Options {
     pub index: bool,
     /// Print the selection as JSON (dmenu mode with `--json`).
     pub json: bool,
+    /// `--text`: the JSON key rows are shown by, and typed text comes back as.
+    pub field: Option<String>,
     pub font: String,
     pub layout: Layout,
     pub theme: Theme,
@@ -81,8 +83,8 @@ pub struct Options {
 
 /// What fills the list.
 pub enum Input {
-    /// dmenu mode: rows from stdin.
-    Stdin(Format),
+    /// dmenu mode: rows from stdin, JSON records shown by `field`.
+    Stdin { format: Format, field: Option<String> },
     /// Script mode: run this script for each menu.
     Script(PathBuf),
 }
@@ -185,7 +187,7 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
     let (events, event_channel) = channel::channel();
     let mut script = None;
     let matcher = match input {
-        Input::Stdin(format) => {
+        Input::Stdin { format, field } => {
             let matcher = Matcher::new(options.case, wake.notify.clone());
             // Read errors just end the list; there is no one to report
             // them to mid-pick.
@@ -193,6 +195,7 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
                 BufReader::new(io::stdin()),
                 matcher.injector(),
                 format,
+                field,
                 move |key, value| {
                     let _ = events.send(script::Event::Mode {
                         call: STDIN,
@@ -589,7 +592,13 @@ impl App {
             },
             // Typed text has no position in the input. -1 like rofi.
             Accept::Query if index => "-1".into(),
-            Accept::Query if json => serde_json::json!({ "text": self.picker.query() }).to_string(),
+            // Under the shown key, so the record has the shape that went in.
+            Accept::Query if json => {
+                let key = self.options.field.as_deref().unwrap_or("text");
+                let mut record = serde_json::Map::new();
+                record.insert(key.to_owned(), self.picker.query().into());
+                serde_json::Value::Object(record).to_string()
+            }
             Accept::Query => self.picker.query().to_owned(),
         }
     }

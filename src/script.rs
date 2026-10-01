@@ -95,7 +95,7 @@ pub fn spawn(
         let mut rows = 0;
         // A read error ends the menu where it got to; the exit status
         // below still tells the UI how the script fared.
-        let _ = format::feed(BufReader::new(stdout), Format::Rofi, |line| match line {
+        let _ = format::feed(BufReader::new(stdout), Format::Rofi, None, |line| match line {
             Line::Mode(key, value) => {
                 let _ = events.send(Event::Mode { call: id, key, value });
             }

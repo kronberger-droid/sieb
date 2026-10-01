@@ -42,6 +42,11 @@ struct Cli {
     #[arg(long, conflicts_with = "script")]
     json: bool,
 
+    /// Show this key of each JSON record instead of `text`. Implies --json
+    // Not `text`: that id belongs to `--color-text`.
+    #[arg(long = "text", value_name = "FIELD", conflicts_with = "script")]
+    field: Option<String>,
+
     /// Print all matches for QUERY without opening a window
     #[arg(short, long, value_name = "QUERY")]
     filter: Option<String>,
@@ -60,7 +65,9 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // Naming a field only makes sense for JSON, so don't make people say both.
+    cli.json |= cli.field.is_some();
 
     let case = if cli.insensitive {
         CaseMatching::Ignore
@@ -69,7 +76,7 @@ fn main() -> ExitCode {
     };
 
     match &cli.filter {
-        Some(query) => filter(case, query, cli.index, cli.json),
+        Some(query) => filter(case, query, cli.index, cli.json, cli.field.clone()),
         None => pick(case, cli),
     }
 }
@@ -92,7 +99,10 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
     };
     let input = match cli.script {
         Some(path) => window::Input::Script(path),
-        None => window::Input::Stdin(format(cli.json)),
+        None => window::Input::Stdin {
+            format: format(cli.json),
+            field: cli.field.clone(),
+        },
     };
 
     let options = window::Options {
@@ -100,6 +110,7 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
         case,
         index: cli.index,
         json: cli.json,
+        field: cli.field,
         font,
         layout,
         theme,
@@ -125,13 +136,20 @@ fn format(json: bool) -> format::Format {
     }
 }
 
-fn filter(case: CaseMatching, query: &str, index: bool, json: bool) -> ExitCode {
+fn filter(
+    case: CaseMatching,
+    query: &str,
+    index: bool,
+    json: bool,
+    field: Option<String>,
+) -> ExitCode {
     let mut matcher = Matcher::new(case, Arc::new(|| {}));
     matcher.set_query(query);
     let reader = matcher::spawn_reader(
         BufReader::new(io::stdin()),
         matcher.injector(),
         format(json),
+        field,
         |_, _| {},
     );
     // The worker going idle only means it caught up with what was injected so
@@ -168,4 +186,16 @@ fn filter(case: CaseMatching, query: &str, index: bool, json: bool) -> ExitCode 
 fn fail(err: impl std::fmt::Display) -> ExitCode {
     eprintln!("sieb: {err}");
     ExitCode::from(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    /// clap only checks the argument table when it parses, so a clash like
+    /// two args with one id would otherwise surface as a panic at startup.
+    #[test]
+    fn cli_is_well_formed() {
+        super::Cli::command().debug_assert();
+    }
 }
