@@ -46,6 +46,11 @@ pub struct Palette {
     pub message_background: [u8; 4],
     pub scrollbar: [u8; 4],
     pub scrollbar_handle: [u8; 4],
+    /// Mode buttons, and the one of the mode on screen.
+    pub button: [u8; 4],
+    pub button_text: [u8; 4],
+    pub button_selected: [u8; 4],
+    pub button_selected_text: [u8; 4],
     pub backdrop: [u8; 4],
 }
 
@@ -76,6 +81,10 @@ impl Default for Palette {
             message_background: TRANSPARENT,
             scrollbar: surface,
             scrollbar_handle: dim,
+            button: surface,
+            button_text: text,
+            button_selected: accent,
+            button_selected_text: [0x1e, 0x1e, 0x2e, 0xff],
             // A light dim, so it reads as modal without hiding what is behind.
             backdrop: [0x00, 0x00, 0x00, 0x40],
         }
@@ -123,6 +132,10 @@ pub struct View<'a> {
     pub selected: Option<usize>,
     /// Rank of the first visible row.
     pub scroll: u32,
+    /// Labels of the mode buttons, drawn when there are at least two.
+    pub buttons: Vec<&'a str>,
+    /// The button of the mode on screen.
+    pub active: usize,
     pub matched: u32,
     pub total: u32,
 }
@@ -240,6 +253,14 @@ pub fn panel(
             let top = s(layout.row_top(i));
             fill(left, top, list_right - left, row_height, row_radius, background);
         }
+        if view.buttons.len() > 1 {
+            let top = s(layout.buttons_top());
+            for i in 0..view.buttons.len() {
+                let (x, w) = layout.button(i);
+                let background = if i == view.active { c.button_selected } else { c.button };
+                fill(s(x), top, s(w), row_height, row_radius, background);
+            }
+        }
         if theme.scrollbar {
             let x = right - scrollbar_width;
             let radius = scrollbar_width / 2.0;
@@ -350,6 +371,17 @@ pub fn panel(
             (span, text_color([r, g, b, a]), style)
         });
         text.draw(&mut canvas, row_left, y, size, row_clip, spans);
+    }
+
+    if view.buttons.len() > 1 {
+        let y = text_top(s(layout.buttons_top()), row_height);
+        for (i, label) in view.buttons.iter().enumerate() {
+            let (x, w) = layout.button(i);
+            let (x, w) = (s(x), s(w));
+            let centered = x + (w - text.width(size, label)).max(0.0) / 2.0;
+            let rgba = if i == view.active { c.button_selected_text } else { c.button_text };
+            text.draw(&mut canvas, centered, y, size, clip(x, x + w), [plain(label, rgba)]);
+        }
     }
 
     to_argb8888(canvas.data);
@@ -545,6 +577,8 @@ mod tests {
             rows,
             selected: Some(2),
             scroll: 0,
+            buttons: vec![],
+            active: 0,
             matched: 120,
             total: 4000,
         };

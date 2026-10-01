@@ -193,6 +193,18 @@ pub struct Colors {
     /// Scrollbar handle [dim]
     #[arg(long = "color-scrollbar-handle", value_name = "COLOR")]
     pub scrollbar_handle: Option<Rgba>,
+    /// Mode buttons [scrollbar]
+    #[arg(long = "color-button", id = "color-button", value_name = "COLOR")]
+    pub button: Option<Rgba>,
+    /// Mode button text [text]
+    #[arg(long = "color-button-text", value_name = "COLOR")]
+    pub button_text: Option<Rgba>,
+    /// The button of the mode on screen [accent]
+    #[arg(long = "color-button-selected", value_name = "COLOR")]
+    pub button_selected: Option<Rgba>,
+    /// Its text [background, opaque]
+    #[arg(long = "color-button-selected-text", value_name = "COLOR")]
+    pub button_selected_text: Option<Rgba>,
     /// Tint over the rest of the output, #00000000 for none
     #[arg(long = "color-backdrop", value_name = "COLOR")]
     pub backdrop: Option<Rgba>,
@@ -254,6 +266,10 @@ impl Appearance {
             message_background,
             scrollbar,
             scrollbar_handle,
+            button,
+            button_text,
+            button_selected,
+            button_selected_text,
             backdrop
         );
         self.colors = colors;
@@ -313,6 +329,7 @@ impl Appearance {
             message_padding: self.message_padding.unwrap_or(d.message_padding),
             lines: self.lines.unwrap_or(d.lines),
             message: false,
+            buttons: 0,
         };
 
         let d = Palette::default();
@@ -324,6 +341,7 @@ impl Appearance {
         let accent = pick(c.accent, d.accent);
         let separator = pick(c.separator, d.separator);
         let matched = pick(c.matched, accent);
+        let scrollbar = pick(c.scrollbar, separator);
         // The badge is text on an accent pill, so it defaults to the panel
         // color, opaque.
         let [r, g, b, _] = background;
@@ -346,8 +364,12 @@ impl Appearance {
             badge_background: pick(c.badge_background, accent),
             message: pick(c.message, dim),
             message_background: pick(c.message_background, d.message_background),
-            scrollbar: pick(c.scrollbar, separator),
+            scrollbar,
             scrollbar_handle: pick(c.scrollbar_handle, dim),
+            button: pick(c.button, scrollbar),
+            button_text: pick(c.button_text, text),
+            button_selected: pick(c.button_selected, accent),
+            button_selected_text: pick(c.button_selected_text, [r, g, b, 0xff]),
             backdrop: pick(c.backdrop, d.backdrop),
         };
         let d = Theme::default();

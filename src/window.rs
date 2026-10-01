@@ -3,7 +3,7 @@
 
 use std::error::Error;
 use std::io::{self, BufReader};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -61,7 +61,7 @@ use smithay_client_toolkit::{
 
 use crate::format::Format;
 use crate::matcher::{self, Matcher};
-use crate::script::{self, Call, Retv};
+use crate::script::{self, Call, Mode, Retv};
 use crate::picker::{Accept, Picker, Wheel};
 use crate::layout::Layout;
 use nucleo::pattern::CaseMatching;
@@ -86,8 +86,9 @@ pub struct Options {
 pub enum Input {
     /// dmenu mode: rows from stdin, JSON records shown by `field`.
     Stdin { format: Format, field: Option<String> },
-    /// Script mode: run this script for each menu.
-    Script(PathBuf),
+    /// Script mode: run a script for each menu, starting with the first.
+    /// More than one makes them modes with buttons to switch between.
+    Script(Vec<Mode>),
 }
 
 /// How the window was closed.
@@ -143,10 +144,15 @@ struct Pending {
     id: u32,
     matcher: Matcher,
     menu: Menu,
+    /// The first call of a mode switched to: keeps the query, like rofi,
+    /// and shows an empty list rather than closing if it prints nothing.
+    switch: bool,
 }
 
 struct ScriptState {
-    path: PathBuf,
+    modes: Vec<Mode>,
+    /// The mode whose script runs.
+    active: usize,
     events: Sender<script::Event>,
     next_id: u32,
     /// The call whose menu is on screen.
@@ -184,7 +190,7 @@ pub fn wake() -> io::Result<Wake> {
     })
 }
 
-pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dyn Error>> {
+pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dyn Error>> {
     // Input starts streaming before anything else, so it arrives while
     // fonts load and the window maps.
     let (events, event_channel) = channel::channel();
@@ -209,9 +215,11 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
             );
             matcher
         }
-        Input::Script(path) => {
+        Input::Script(modes) => {
+            options.layout.buttons = modes.len();
             let mut state = ScriptState {
-                path,
+                modes,
+                active: 0,
                 events,
                 // Ids start past the initial menu, which shows nothing.
                 next_id: 1,
@@ -221,8 +229,8 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
             };
             // No token: the first menu launches nothing.
             state
-                .start(Call::initial(), options.case, &wake.notify)
-                .map_err(|err| format!("{}: {err}", state.path.display()))?;
+                .start(Call::initial(), options.case, &wake.notify, false)
+                .map_err(|err| format!("{}: {err}", state.path().display()))?;
             script = Some(state);
             // Shown until the first menu arrives.
             Matcher::new(options.case, wake.notify.clone())
@@ -300,6 +308,7 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
         hovered: None,
         pointer_at: None,
         pressed: None,
+        pressed_button: None,
         options,
         matcher,
         text,
@@ -377,6 +386,8 @@ struct App {
     pointer_at: Option<(f64, f64)>,
     /// Visible row a left press started on.
     pressed: Option<usize>,
+    /// Mode button a left press started on.
+    pressed_button: Option<usize>,
     text: Text,
     /// A frame callback is outstanding; draw again when it fires.
     frame_pending: bool,
@@ -443,6 +454,12 @@ impl App {
                 let accept = self.picker.accept(count, self.modifiers.shift);
                 self.accept(accept);
             }
+            // rofi's mode keys. Before the plain Tab arms, which move.
+            Keysym::Tab if ctrl && self.modifiers.shift => self.cycle_mode(-1),
+            Keysym::ISO_Left_Tab if ctrl => self.cycle_mode(-1),
+            Keysym::Tab if ctrl => self.cycle_mode(1),
+            Keysym::Left | Keysym::KP_Left if self.modifiers.shift => self.cycle_mode(-1),
+            Keysym::Right | Keysym::KP_Right if self.modifiers.shift => self.cycle_mode(1),
             Keysym::Up | Keysym::KP_Up | Keysym::ISO_Left_Tab => self.move_by(-1, count),
             Keysym::Down | Keysym::KP_Down | Keysym::Tab => self.move_by(1, count),
             _ if is(Keysym::p, Keysym::P) || is(Keysym::k, Keysym::K) => self.move_by(-1, count),
@@ -535,9 +552,63 @@ impl App {
         let Some(script) = &mut self.script else {
             return;
         };
-        if let Err(err) = script.start(call, self.options.case, &self.notify) {
-            self.outcome = Some(Outcome::Failed(format!("{}: {err}", script.path.display())));
+        if let Err(err) = script.start(call, self.options.case, &self.notify, false) {
+            self.outcome = Some(Outcome::Failed(format!("{}: {err}", script.path().display())));
         }
+    }
+
+    /// Moves `delta` modes along, wrapping around.
+    fn cycle_mode(&mut self, delta: isize) {
+        let Some(script) = &self.script else {
+            return;
+        };
+        let n = script.modes.len() as isize;
+        self.switch_mode((script.active as isize + delta).rem_euclid(n) as usize);
+    }
+
+    /// Shows mode `to`, starting its script afresh. Whatever the mode on
+    /// screen was waiting for is dropped.
+    fn switch_mode(&mut self, to: usize) {
+        let Some(script) = &mut self.script else {
+            return;
+        };
+        if to == script.active || to >= script.modes.len() {
+            return;
+        }
+        script.active = to;
+        script.awaiting_token = None;
+        let call = Call {
+            query: self.picker.query().to_owned(),
+            ..Call::initial()
+        };
+        if let Err(err) = script.start(call, self.options.case, &self.notify, true) {
+            self.outcome = Some(Outcome::Failed(format!("{}: {err}", script.path().display())));
+        }
+        // The button follows right away, the list once rows arrive.
+        self.redraw();
+    }
+
+    /// Puts a pending call's menu on screen.
+    fn show(&mut self, pending: Pending) {
+        if let Some(script) = &mut self.script {
+            script.visible = Some(pending.id);
+        }
+        self.matcher = pending.matcher;
+        self.menu = pending.menu;
+        if !self.menu.keep_filter && !pending.switch {
+            self.picker.clear();
+        }
+        self.picker.clamp(0);
+        self.matcher.set_query(self.picker.query());
+        self.refresh();
+        if let Some(rank) = self.menu.new_selection {
+            // The script printed its rows before exiting, but they may still
+            // be in flight: give the matcher a moment so a selection near
+            // the end has a row to land on.
+            self.matcher.settle(Duration::from_millis(50));
+            self.picker.select(rank, self.matcher.counts().0);
+        }
+        self.redraw();
     }
 
     fn script_event(&mut self, event: script::Event) {
@@ -557,40 +628,30 @@ impl App {
         match event {
             script::Event::Mode { .. } => unreachable!("handled above"),
             script::Event::FirstRow { call } => {
-                let Some(pending) = script.pending.take_if(|p| p.id == call) else {
-                    return;
-                };
-                script.visible = Some(call);
-                self.matcher = pending.matcher;
-                self.menu = pending.menu;
-                if !self.menu.keep_filter {
-                    self.picker.clear();
+                if let Some(pending) = script.pending.take_if(|p| p.id == call) {
+                    self.show(pending);
                 }
-                self.picker.clamp(0);
-                self.matcher.set_query(self.picker.query());
-                self.refresh();
-                if let Some(rank) = self.menu.new_selection {
-                    // The script printed its rows before exiting, but they
-                    // may still be in flight: give the matcher a moment so
-                    // a selection near the end has a row to land on.
-                    self.matcher.settle(Duration::from_millis(50));
-                    self.picker.select(rank, self.matcher.counts().0);
-                }
-                self.redraw();
             }
             script::Event::Done { call, status, rows } => {
-                if script.pending.as_ref().is_some_and(|p| p.id == call) {
+                let path = script.path().display().to_string();
+                match script.pending.take_if(|p| p.id == call) {
+                    // A mode with nothing to list still gets its screen.
+                    Some(pending) if pending.switch => self.show(pending),
                     // Rows would have shown the menu already, so this call
                     // printed nothing: the script is done.
-                    debug_assert_eq!(rows, 0);
-                    script.pending = None;
-                    self.outcome = Some(if status.success() {
-                        Outcome::Quit
-                    } else {
-                        Outcome::Failed(format!("{} exited with {status}", script.path.display()))
-                    });
-                } else if !status.success() {
-                    eprintln!("sieb: {} exited with {status}", script.path.display());
+                    Some(_) => {
+                        debug_assert_eq!(rows, 0);
+                        self.outcome = Some(if status.success() {
+                            Outcome::Quit
+                        } else {
+                            Outcome::Failed(format!("{path} exited with {status}"))
+                        });
+                        return;
+                    }
+                    None => {}
+                }
+                if !status.success() {
+                    eprintln!("sieb: {path} exited with {status}");
                 }
             }
         }
@@ -661,7 +722,13 @@ impl App {
         let selected = (matched > 0).then(|| (self.picker.selected() - scroll) as usize);
         let rows = self.matcher.window(scroll, self.picker.lines());
         let view = View {
-            prompt: self.menu.prompt.as_deref().or(self.options.prompt.as_deref()),
+            // As in rofi, a mode's name is its prompt unless it sets one.
+            prompt: self
+                .menu
+                .prompt
+                .as_deref()
+                .or(self.options.prompt.as_deref())
+                .or(self.script.as_ref().map(|s| s.modes[s.active].label.as_str())),
             message: self.menu.message.as_deref(),
             query: self.picker.query(),
             rows: rows
@@ -674,6 +741,10 @@ impl App {
                 .collect(),
             selected,
             scroll,
+            buttons: self.script.as_ref().map_or_else(Vec::new, |s| {
+                s.modes.iter().map(|mode| mode.label.as_str()).collect()
+            }),
+            active: self.script.as_ref().map_or(0, |s| s.active),
             matched,
             total,
         };
@@ -735,17 +806,23 @@ impl ScriptState {
         call: Call,
         case: CaseMatching,
         notify: &Arc<dyn Fn() + Send + Sync>,
+        switch: bool,
     ) -> io::Result<()> {
         let id = self.next_id;
         self.next_id += 1;
         let matcher = Matcher::new(case, notify.clone());
-        script::spawn(&self.path, call, id, matcher.injector(), self.events.clone())?;
+        script::spawn(self.path(), call, id, matcher.injector(), self.events.clone())?;
         self.pending = Some(Pending {
             id,
             matcher,
             menu: Menu::default(),
+            switch,
         });
         Ok(())
+    }
+
+    fn path(&self) -> &Path {
+        &self.modes[self.active].path
     }
 }
 
@@ -1041,11 +1118,20 @@ impl PointerHandler for App {
                 PointerEventKind::Leave { .. } => self.hovered = None,
                 PointerEventKind::Press { button: BTN_LEFT, serial, .. } => {
                     self.serial = serial;
-                    self.pressed = self.options.layout.row_at(event.position.1);
+                    let (x, y) = event.position;
+                    self.pressed = self.options.layout.row_at(y);
+                    self.pressed_button = self.options.layout.button_at(x, y);
                 }
                 // Single click accepts. Wayland has no double click, and
                 // inventing a threshold would ignore the user's settings.
                 PointerEventKind::Release { button: BTN_LEFT, .. } => {
+                    let (x, y) = event.position;
+                    let button = self.options.layout.button_at(x, y);
+                    if let Some(button) = button
+                        && Some(button) == self.pressed_button.take()
+                    {
+                        self.switch_mode(button);
+                    }
                     let row = self.options.layout.row_at(event.position.1);
                     if row.is_some() && row == self.pressed.take()
                         && let Some(rank) = row.and_then(|row| self.rank_at(row))

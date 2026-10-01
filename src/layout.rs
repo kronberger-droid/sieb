@@ -28,6 +28,8 @@ pub struct Layout {
     pub lines: u32,
     /// A script set a message, shown in a box of its own above the list.
     pub message: bool,
+    /// Mode buttons under the list, one per script; none for fewer than 2.
+    pub buttons: usize,
 }
 
 impl Default for Layout {
@@ -44,6 +46,7 @@ impl Default for Layout {
             message_padding: 6.5,
             lines: 10,
             message: false,
+            buttons: 0,
         }
     }
 }
@@ -110,8 +113,43 @@ impl Layout {
         self.list_top() + i as f32 * (self.row() + self.row_spacing)
     }
 
+    fn has_buttons(&self) -> bool {
+        self.buttons > 1
+    }
+
+    /// Top of the mode buttons, which are as tall as a row.
+    pub fn buttons_top(&self) -> f32 {
+        self.list_top() + self.list_height() + self.spacing
+    }
+
+    /// Left edge and width of mode button `i`. The buttons share the
+    /// width, `spacing` apart.
+    pub fn button(&self, i: usize) -> (f32, f32) {
+        let n = self.buttons.max(1) as f32;
+        let width = (self.width - 2.0 * self.padding - (n - 1.0) * self.spacing) / n;
+        (self.padding + i as f32 * (width + self.spacing), width)
+    }
+
+    /// The mode button under surface coordinate (`x`, `y`), if any.
+    pub fn button_at(&self, x: f64, y: f64) -> Option<usize> {
+        let (x, y) = (x as f32, y as f32);
+        let top = self.buttons_top();
+        if !self.has_buttons() || y < top || y >= top + self.row() {
+            return None;
+        }
+        (0..self.buttons).find(|&i| {
+            let (left, width) = self.button(i);
+            (left..left + width).contains(&x)
+        })
+    }
+
     pub fn height(&self) -> f32 {
-        self.list_top() + self.list_height() + self.padding
+        let buttons = if self.has_buttons() {
+            self.spacing + self.row()
+        } else {
+            0.0
+        };
+        self.list_top() + self.list_height() + buttons + self.padding
     }
 
     /// Panel size, rounded up to whole logical pixels.
@@ -198,6 +236,35 @@ mod tests {
             ..layout()
         };
         assert_eq!(with.list_top() - without.list_top(), with.separator + with.spacing);
+    }
+
+    #[test]
+    fn buttons_share_the_width() {
+        let layout = Layout {
+            width: 400.0,
+            padding: 10.0,
+            spacing: 10.0,
+            buttons: 4,
+            ..layout()
+        };
+        // (380 - 3 * 10) / 4 = 87.5 each.
+        assert_eq!(layout.button(0), (10.0, 87.5));
+        assert_eq!(layout.button(3), (302.5, 87.5));
+        let y = layout.buttons_top() as f64 + 1.0;
+        assert_eq!(layout.button_at(11.0, y), Some(0));
+        assert_eq!(layout.button_at(100.0, y), None, "the gap between 0 and 1");
+        assert_eq!(layout.button_at(389.0, y), Some(3));
+        assert_eq!(layout.height(), layout.buttons_top() + layout.row() + layout.padding);
+    }
+
+    #[test]
+    fn one_script_has_no_buttons() {
+        let one = Layout {
+            buttons: 1,
+            ..layout()
+        };
+        assert_eq!(one.height(), layout().height());
+        assert_eq!(one.button_at(20.0, one.buttons_top() as f64 + 1.0), None);
     }
 
     #[test]

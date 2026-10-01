@@ -47,4 +47,8 @@ accent = "#f5c2e7"    # the caret
 # message-background  none
 # scrollbar           separator, the track
 # scrollbar-handle    dim
+# button              scrollbar, the mode buttons
+# button-text         text
+# button-selected     accent, the button of the mode on screen
+# button-selected-text  background, opaque
 backdrop = "#00000040" # tint over the rest of the output, #00000000 for none

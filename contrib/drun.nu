@@ -81,7 +81,6 @@ def escape [] {
 }
 
 def menu [] {
-    print "\u{0}prompt\u{1f}\u{f002}"
     print "\u{0}markup-rows\u{1f}true"
     let counts = history
     entries

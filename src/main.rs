@@ -53,9 +53,10 @@ struct Cli {
     filter: Option<String>,
 
     /// Build the menus with SCRIPT instead of reading stdin, using rofi's
-    /// script protocol
-    #[arg(short, long, value_name = "SCRIPT", conflicts_with = "filter")]
-    script: Option<PathBuf>,
+    /// script protocol. Given more than once, each script is a mode with a
+    /// button, named by LABEL or the file name
+    #[arg(short, long, value_name = "[LABEL:]SCRIPT", conflicts_with = "filter")]
+    script: Vec<script::Mode>,
 
     /// Config file [default: $XDG_CONFIG_HOME/sieb/config.toml]
     #[arg(long, value_name = "PATH")]
@@ -98,12 +99,13 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
         Ok(wake) => wake,
         Err(err) => return fail(err),
     };
-    let input = match cli.script {
-        Some(path) => window::Input::Script(path),
-        None => window::Input::Stdin {
+    let input = if cli.script.is_empty() {
+        window::Input::Stdin {
             format: format(cli.json),
             field: cli.field.clone(),
-        },
+        }
+    } else {
+        window::Input::Script(cli.script)
     };
 
     let options = window::Options {

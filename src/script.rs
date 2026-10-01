@@ -6,7 +6,8 @@
 //! printing nothing ends the session.
 
 use std::io::{self, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 
@@ -15,6 +16,38 @@ use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
 use crate::format::{self, Format, Line};
 use crate::matcher::{self, Entry};
+
+/// A script and the label of its button, from `--script [LABEL:]PATH`,
+/// rofi's `-modi name:script` spelled for sieb.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mode {
+    pub label: String,
+    pub path: PathBuf,
+}
+
+impl FromStr for Mode {
+    type Err = String;
+
+    /// A colon splits off a label unless what comes before it has a slash,
+    /// so `./odd:name.nu` stays a path.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (label, path) = match s.split_once(':') {
+            Some((label, path)) if !label.contains('/') => (Some(label), path),
+            _ => (None, s),
+        };
+        if path.is_empty() {
+            return Err("missing script path".into());
+        }
+        let path = PathBuf::from(path);
+        let label = match label {
+            Some(label) => label.to_owned(),
+            None => path
+                .file_stem()
+                .map_or_else(|| path.display().to_string(), |stem| stem.to_string_lossy().into_owned()),
+        };
+        Ok(Self { label, path })
+    }
+}
 
 /// Why the script is being called, as `ROFI_RETV`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +229,17 @@ mod tests {
 
     fn initial() -> Call {
         Call::initial()
+    }
+
+    #[test]
+    fn mode_labels() {
+        let mode = |s: &str| s.parse::<Mode>().unwrap();
+        assert_eq!(mode("contrib/drun.nu").label, "drun");
+        let labelled = mode("apps:contrib/drun.nu");
+        assert_eq!((labelled.label.as_str(), labelled.path.to_str()), ("apps", Some("contrib/drun.nu")));
+        // A colon after a slash belongs to the path.
+        assert_eq!(mode("./odd:name.nu").path.to_str(), Some("./odd:name.nu"));
+        assert!("apps:".parse::<Mode>().is_err());
     }
 
     #[test]
