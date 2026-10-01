@@ -189,6 +189,9 @@ impl App {
             .pool
             .create_buffer(bw, bh, bw * 4, wl_shm::Format::Argb8888)
             .expect("allocate panel buffer");
+        // Slots are rounded up to 64 byte alignment, so the canvas can be
+        // longer than the buffer it backs.
+        let canvas = &mut canvas[..(bw * bh * 4) as usize];
         render::panel(canvas, bw as u32, bh as u32, self.scale as f32);
         self.panel_viewport.set_destination(pw as i32, ph as i32);
         buffer.attach_to(&self.panel).expect("attach panel buffer");
@@ -206,7 +209,7 @@ impl App {
                 .pool
                 .create_buffer(1, 1, 4, wl_shm::Format::Argb8888)
                 .expect("allocate backdrop buffer");
-            render::backdrop(canvas);
+            render::backdrop(&mut canvas[..4]);
             buffer.attach_to(backdrop).expect("attach backdrop buffer");
             backdrop.damage_buffer(0, 0, 1, 1);
             self.backdrop_buffer = Some(buffer);
