@@ -58,7 +58,7 @@ def entries [] {
 }
 
 def menu [] {
-    print "\u{0}prompt\u{1f}run"
+    print "\u{0}prompt\u{1f}\u{f002}"
     entries | each {|entry|
         # Matched but not shown: lets "browser" find Firefox.
         let meta = [

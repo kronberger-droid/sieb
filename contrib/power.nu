@@ -1,20 +1,22 @@
 #!/usr/bin/env nu
-# Power menu for `sieb --script contrib/power.nu`.
+# Power menu, after rofi's powermenu.sh:
+#
+#     sieb --config contrib/power.toml --script contrib/power.nu
 #
 # Shows how a script drives sieb: called with no argument it prints the
 # first menu, called with the picked entry it either prints a follow-up
 # menu (the confirmation) or acts and prints nothing, which closes sieb.
-#
-# sieb waits for the script's stdout to close. A script that starts a
-# long-running program in the background has to detach its output, e.g.
-# `job spawn { ^firefox o+e> /dev/null }`, or sieb stays open until Esc.
 
-const ACTIONS = {
-    Lock: [loginctl lock-session]
-    Suspend: [systemctl suspend]
-    Reboot: [systemctl reboot]
-    Shutdown: [systemctl poweroff]
-}
+# Glyphs from Nerd Fonts, keyed by the action they stand for.
+const ACTIONS = [
+    [action glyph];
+    [lock "\u{f033e}"]
+    [suspend "\u{f0904}"]
+    [logout "\u{f0343}"]
+    [hibernate "\u{f04b2}"]
+    [reboot "\u{f0709}"]
+    [shutdown "\u{f0425}"]
+]
 
 # rofi's in-band options: `\0key\x1fvalue` lines set menu options, and
 # `text\0key\x1fvalue` attaches options to a row.
@@ -30,27 +32,62 @@ def row [text: string, ...options: string] {
     }
 }
 
+def uptime [] {
+    let seconds = open /proc/uptime | split row " " | first | into float | into int
+    let h = $seconds // 3600
+    let m = $seconds mod 3600 // 60
+    let s = $seconds mod 60
+    $"($h)h ($m)m ($s)s"
+}
+
 def actions-menu [] {
-    menu-option prompt power
-    # Typed text that matches nothing should not reach the script.
+    menu-option prompt (sys host | get hostname)
+    menu-option message $"Uptime: (uptime)"
     menu-option no-custom "true"
-    $ACTIONS | columns | each {|action| row $action } | ignore
+    for it in $ACTIONS {
+        row $"($it.glyph) ($it.action)" info $it.action
+    }
+}
+
+def confirm-menu [action: string] {
+    menu-option prompt Confirmation
+    menu-option message "Are you Sure?"
+    menu-option no-custom "true"
+    row "\u{f012c} yes" info $action
+    row "\u{f0156} no"
+}
+
+# Detached and with its output closed, so sieb sees the script finish.
+def spawn [...argv: string] {
+    ^setsid -f ...$argv o+e> /dev/null
+}
+
+def act [action: string] {
+    match $action {
+        lock => { spawn veila lock }
+        suspend => { systemctl suspend }
+        hibernate => { systemctl hibernate }
+        reboot => { systemctl reboot }
+        shutdown => { systemctl poweroff }
+        logout => {
+            if ($env.NIRI_SOCKET? | is-not-empty) {
+                niri msg action quit
+            } else if ($env.SWAYSOCK? | is-not-empty) {
+                swaymsg exit
+            }
+        }
+    }
 }
 
 def main [choice?: string] {
-    match $choice {
-        null => { actions-menu }
-        "Yes" => {
-            # The confirmed action rode along in the row's info.
-            let command = $ACTIONS | get $env.ROFI_INFO
-            run-external ...$command
-        }
-        "No" => { actions-menu }
-        $action => {
-            menu-option prompt $"($action | str lowercase)?"
-            menu-option no-custom "true"
-            row "No"
-            row "Yes" info $action
-        }
+    let info = $env.ROFI_INFO? | default ""
+    match [$choice $info] {
+        [null, _] => { actions-menu }
+        # Locking is undone by unlocking, so it needs no confirmation.
+        [_, lock] => { act lock }
+        [$picked, $action] if ($picked | str ends-with " yes") => { act $action }
+        # "no" closes the menu, like rofi's.
+        [$picked, _] if ($picked | str ends-with " no") => {}
+        [_, $action] => { confirm-menu $action }
     }
 }
