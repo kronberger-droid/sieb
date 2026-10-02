@@ -40,6 +40,7 @@ such as niri or sway. GNOME lacks it.
 - [Scripts and modes](docs/scripts.md): the rofi protocol, markup, modes
 - [Theming](docs/theming.md): the config file and its keys
 - [Examples](docs/examples.md): the launcher, a power menu, streams
+- [Pinentry](docs/pinentry.md): password prompts for rbw and gpg-agent
 
 ## License
 
