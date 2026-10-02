@@ -47,10 +47,12 @@
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
         nativeBuildInputs = [pkgs.pkg-config];
-        # nushell so fixupPhase's patchShebangs pins the scripts' `env nu`.
-        buildInputs = nativeDepsFor pkgs ++ [pkgs.nushell];
+        buildInputs = nativeDepsFor pkgs;
         # The example scripts double as the stock launcher and power menu,
         # so they ship with the binary for configs to point --script at.
+        # nushell stays out of buildInputs on purpose: the scripts keep
+        # `env nu` and run on whichever nu the user brings, rather than
+        # dragging a second one into the closure.
         postInstall = ''
           mkdir -p $out/share/sieb
           cp -r examples $out/share/sieb/examples
