@@ -40,15 +40,18 @@ anywhere.
 rbw unlock; sieb --script examples/rbw/rbw.nu
 ```
 
-`rbw/rbw.nu` lists the Bitwarden vault through
+`rbw/rbw.nu` lists the logins in a Bitwarden vault through
 [rbw](https://github.com/doy/rbw). Enter types the pick's username, Tab
 and password in one go, and copies its TOTP code if it has one, as
 rofi-rbw does. Ctrl+Enter offers the rest: either field typed or copied
 alone, or the TOTP code. Copies are marked sensitive
 and cleared after 30 seconds. The passwords go from rbw straight into
-`wtype` or `wl-copy`, never through the script. Needs rbw, wtype and
-wl-clipboard; with [`sieb-pinentry`](pinentry.md) as rbw's pinentry, the
-unlock is a sieb panel too.
+`wtype` or `wl-copy`, never through the script. A value that is empty or
+spans several lines is not typed, and every failure shows as a
+notification. Rows go out in the JSON protocol and picks are acted on by
+entry id only, so no entry name can pose as another entry. Needs rbw,
+wtype, wl-clipboard and notify-send; with [`sieb-pinentry`](pinentry.md)
+as rbw's pinentry, the unlock is a sieb panel too.
 
 ## Streams
 
