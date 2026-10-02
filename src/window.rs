@@ -487,6 +487,12 @@ impl App {
     }
 
     fn key(&mut self, event: KeyEvent) {
+        // Keys after Enter in the same batch would otherwise reach the
+        // dmenu path below, which in password mode means drawing them as
+        // plain text once the secret is gone.
+        if self.outcome.is_some() {
+            return;
+        }
         if self.secret.is_some() {
             self.secret_key(event);
             return;
