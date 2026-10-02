@@ -34,6 +34,21 @@ Locks, suspends, logs out, hibernates, reboots or shuts down, the last
 five after a confirmation. Logout knows niri and sway; the rest works
 anywhere.
 
+## Passwords
+
+```nu
+rbw unlock; sieb --script examples/rbw/rbw.nu
+```
+
+`rbw/rbw.nu` lists the Bitwarden vault through
+[rbw](https://github.com/doy/rbw), then types or copies the pick: username,
+Tab and password in one go, either alone, or a TOTP code. A TOTP is copied
+after a full autotype too, as rofi-rbw does. Copies are marked sensitive
+and cleared after 30 seconds. The passwords go from rbw straight into
+`wtype` or `wl-copy`, never through the script. Needs rbw, wtype and
+wl-clipboard; with [`sieb-pinentry`](pinentry.md) as rbw's pinentry, the
+unlock is a sieb panel too.
+
 ## Streams
 
 Plain dmenu use with large, slow input. Run them from a terminal.
