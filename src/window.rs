@@ -540,7 +540,7 @@ impl App {
         let (retv, arg, info) = match accept {
             Accept::Match(rank) => match self.matcher.get(rank) {
                 Some(entry) if entry.row.selectable => {
-                    (Retv::Entry, entry.row.text.as_str(), entry.row.info.clone())
+                    (Retv::Entry, entry.row.text.as_str(), entry.row.info().map(str::to_owned))
                 }
                 _ => return,
             },
@@ -766,7 +766,7 @@ impl App {
                 .into_iter()
                 .map(|(entry, indices)| render::RowView {
                     text: &entry.row.text,
-                    styles: &entry.row.styles,
+                    styles: entry.row.styles(),
                     indices,
                 })
                 .collect(),

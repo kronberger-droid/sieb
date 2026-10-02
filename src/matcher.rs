@@ -20,7 +20,7 @@ pub struct Entry {
 pub fn push(injector: &Injector<Entry>, index: u32, row: Row) {
     injector.push(Entry { index, row }, |entry, columns| {
         let row = &entry.row;
-        columns[0] = match &row.meta {
+        columns[0] = match row.meta() {
             Some(meta) => format!("{} {meta}", row.text).into(),
             None => row.text.as_str().into(),
         };
@@ -45,11 +45,10 @@ impl Print {
             Print::Index => entry.index.to_string(),
             // The whole object, unknown fields included, so a pipeline gets
             // back the record it put in.
-            Print::Json { .. } => entry
-                .row
-                .raw
-                .clone()
-                .unwrap_or_else(|| serde_json::json!({ "text": entry.row.text }).to_string()),
+            Print::Json { .. } => match entry.row.raw() {
+                Some(raw) => raw.to_owned(),
+                None => serde_json::json!({ "text": entry.row.text }).to_string(),
+            },
         }
     }
 
@@ -212,10 +211,8 @@ mod tests {
 
     #[test]
     fn print_picks_and_typed_text() {
-        let json = Row {
-            raw: Some(r#"{"name":"a.rs","size":1}"#.into()),
-            ..Row::plain("a.rs".into())
-        };
+        let mut json = Row::plain("a.rs".into());
+        json.extra_mut().raw = Some(r#"{"name":"a.rs","size":1}"#.into());
         let entry = |row| Entry { index: 4, row };
         let named = Print::Json {
             field: Some("name".into()),

@@ -30,12 +30,19 @@ pub enum Line {
 #[derive(Debug, PartialEq)]
 pub struct Row {
     pub text: String,
+    pub selectable: bool,
+    /// What plain lines never have, boxed so a large stdin does not pay
+    /// for four empty fields on every row.
+    extra: Option<Box<Extra>>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct Extra {
     /// Handed back to the script in `ROFI_INFO` when this row is picked.
     pub info: Option<String>,
     /// Extra search terms, matched but not shown.
     pub meta: Option<String>,
-    pub selectable: bool,
-    /// The JSON object this row came from, printed back on selection so
+    /// The JSON value this row came from, printed back on selection so
     /// fields sieb does not know about survive the round trip.
     pub raw: Option<String>,
     /// Styled byte ranges of `text`, from markup.
@@ -46,22 +53,40 @@ impl Row {
     pub fn plain(text: String) -> Self {
         Self {
             text,
-            info: None,
-            meta: None,
             selectable: true,
-            raw: None,
-            styles: Vec::new(),
+            extra: None,
         }
     }
 
+    pub fn info(&self) -> Option<&str> {
+        self.extra.as_ref()?.info.as_deref()
+    }
+
+    pub fn meta(&self) -> Option<&str> {
+        self.extra.as_ref()?.meta.as_deref()
+    }
+
+    pub fn raw(&self) -> Option<&str> {
+        self.extra.as_ref()?.raw.as_deref()
+    }
+
+    pub fn styles(&self) -> &[(Range<usize>, Style)] {
+        self.extra.as_ref().map_or(&[], |extra| &extra.styles)
+    }
+
+    /// The extras, created on first use.
+    pub fn extra_mut(&mut self) -> &mut Extra {
+        self.extra.get_or_insert_default()
+    }
+
     /// Reads the text as markup: tags become styles, entities characters.
-    fn with_markup(self) -> Self {
+    fn with_markup(mut self) -> Self {
         let markup = markup::parse(&self.text);
-        Self {
-            text: markup.text,
-            styles: markup.spans,
-            ..self
+        self.text = markup.text;
+        if !markup.spans.is_empty() {
+            self.extra_mut().styles = markup.spans;
         }
+        self
     }
 }
 
@@ -166,8 +191,8 @@ pub fn parse_rofi(line: &str) -> Line {
     while let Some(key) = pairs.next() {
         let value = pairs.next().unwrap_or_default();
         match key {
-            "info" => row.info = Some(value.to_owned()),
-            "meta" => row.meta = Some(value.to_owned()),
+            "info" => row.extra_mut().info = Some(value.to_owned()),
+            "meta" => row.extra_mut().meta = Some(value.to_owned()),
             "nonselectable" => row.selectable = value != "true",
             // icon, urgent, active, permanent: not supported yet.
             _ => {}
@@ -199,10 +224,8 @@ fn from_value(value: Value, field: Option<&str>) -> Vec<Line> {
         // Printed back as the same JSON value it came in as.
         scalar => {
             let raw = scalar.to_string();
-            let row = Row {
-                raw: Some(raw),
-                ..Row::plain(as_string(scalar))
-            };
+            let mut row = Row::plain(as_string(scalar));
+            row.extra_mut().raw = Some(raw);
             return vec![Line::Row(row)];
         }
     };
@@ -221,11 +244,11 @@ fn from_value(value: Value, field: Option<&str>) -> Vec<Line> {
         Some(text) => as_string(text.clone()),
         None => Value::Object(object.clone()).to_string(),
     };
-    let row = Row {
-        text,
+    let mut row = Row::plain(text);
+    row.selectable = object.get("selectable") != Some(&Value::Bool(false));
+    *row.extra_mut() = Extra {
         info: object.get("info").cloned().map(as_string),
         meta: object.get("meta").cloned().map(as_string),
-        selectable: object.get("selectable") != Some(&Value::Bool(false)),
         raw: Some(Value::Object(object).to_string()),
         styles: Vec::new(),
     };
@@ -261,16 +284,13 @@ mod tests {
 
     #[test]
     fn rofi_row_options() {
+        let line = parse_rofi(
+            "Shutdown\0info\x1fpoweroff\x1fmeta\x1fhalt off\x1fnonselectable\x1ftrue\x1ficon\x1fsystem",
+        );
+        let Line::Row(r) = line else { panic!("{line:?}") };
         assert_eq!(
-            parse_rofi("Shutdown\0info\x1fpoweroff\x1fmeta\x1fhalt off\x1fnonselectable\x1ftrue\x1ficon\x1fsystem"),
-            Line::Row(Row {
-                text: "Shutdown".into(),
-                info: Some("poweroff".into()),
-                meta: Some("halt off".into()),
-                selectable: false,
-                raw: None,
-                styles: vec![],
-            })
+            (r.text.as_str(), r.info(), r.meta(), r.selectable, r.raw()),
+            ("Shutdown", Some("poweroff"), Some("halt off"), false, None)
         );
     }
 
@@ -281,7 +301,7 @@ mod tests {
         assert_eq!(lines[0], row("<b>a</b>"));
         let Line::Row(r) = &lines[2] else { panic!() };
         assert_eq!(r.text, "b & c");
-        assert_eq!(r.styles.len(), 1);
+        assert_eq!(r.styles().len(), 1);
     }
 
     #[test]
@@ -314,11 +334,11 @@ not json
         assert_eq!(lines[0], Line::Mode("prompt".into(), "files".into()));
         assert_eq!(lines[1], Line::Mode("no-custom".into(), "true".into()));
         let Line::Row(object) = &lines[2] else { panic!() };
-        assert_eq!((object.text.as_str(), object.info.as_deref()), ("a.rs", Some("3")));
+        assert_eq!((object.text.as_str(), object.info()), ("a.rs", Some("3")));
         // Unknown fields ride along for the output.
-        assert!(object.raw.as_deref().unwrap().contains(r#""size":10"#));
+        assert!(object.raw().unwrap().contains(r#""size":10"#));
         // A bare string prints back as the same JSON string.
-        assert!(matches!(&lines[3], Line::Row(r) if r.text == "plain" && r.raw.as_deref() == Some("\"plain\"")));
+        assert!(matches!(&lines[3], Line::Row(r) if r.text == "plain" && r.raw() == Some("\"plain\"")));
         assert_eq!(lines[4], row("not json"));
         assert_eq!(lines.len(), 5);
     }
@@ -329,7 +349,7 @@ not json
         let lines = all(r#"[{"name":"a.rs","type":"file","size":10}]"#, Format::Json);
         assert!(matches!(&lines[..], [Line::Row(r)]
             if r.text == r#"{"name":"a.rs","type":"file","size":10}"#
-            && r.raw.as_deref() == Some(r.text.as_str())));
+            && r.raw() == Some(r.text.as_str())));
         // An unknown key next to option keys makes it a row too.
         assert!(matches!(&all(r#"{"prompt":"p","name":"x"}"#, Format::Json)[..], [Line::Row(_)]));
     }
@@ -350,7 +370,7 @@ not json
         assert_eq!(texts, ["a.rs", "b.rs", r#"{"size":3}"#]);
         // The whole record still goes back out on selection.
         assert!(matches!(&lines[0], Line::Row(r)
-            if r.raw.as_deref() == Some(r#"{"name":"a.rs","size":10}"#)));
+            if r.raw() == Some(r#"{"name":"a.rs","size":10}"#)));
     }
 
     #[test]
