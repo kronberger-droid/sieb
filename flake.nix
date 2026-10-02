@@ -47,7 +47,14 @@
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
         nativeBuildInputs = [pkgs.pkg-config];
-        buildInputs = nativeDepsFor pkgs;
+        # nushell so fixupPhase's patchShebangs pins the scripts' `env nu`.
+        buildInputs = nativeDepsFor pkgs ++ [pkgs.nushell];
+        # The example scripts double as the stock launcher and power menu,
+        # so they ship with the binary for configs to point --script at.
+        postInstall = ''
+          mkdir -p $out/share/sieb
+          cp -r examples $out/share/sieb/examples
+        '';
         meta = {
           description = "dmenu-first Wayland picker, extended through scripts";
           license = pkgs.lib.licenses.mit;
