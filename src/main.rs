@@ -13,11 +13,13 @@ use std::io::{self, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use nucleo::pattern::CaseMatching;
 
-use matcher::Matcher;
+use format::Format;
+use matcher::{Matcher, Print};
 
 /// dmenu-first Wayland picker.
 ///
@@ -67,23 +69,32 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
-    let mut cli = Cli::parse();
-    // Naming a field only makes sense for JSON, so don't make people say both.
-    cli.json |= cli.field.is_some();
-
+    let cli = Cli::parse();
     let case = if cli.insensitive {
         CaseMatching::Ignore
     } else {
         CaseMatching::Smart
     };
+    // Naming a field only makes sense for JSON, so don't make people say both.
+    let json = cli.json || cli.field.is_some();
+    let print = if cli.index {
+        Print::Index
+    } else if json {
+        Print::Json {
+            field: cli.field.clone(),
+        }
+    } else {
+        Print::Text
+    };
+    let format = if json { Format::Json } else { Format::Plain };
 
     match &cli.filter {
-        Some(query) => filter(case, query, cli.index, cli.json, cli.field.clone()),
-        None => pick(case, cli),
+        Some(query) => filter(case, query, format, cli.field.clone(), &print),
+        None => pick(case, cli, format, print),
     }
 }
 
-fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
+fn pick(case: CaseMatching, cli: Cli, format: Format, print: Print) -> ExitCode {
     // Read before anything else, so a broken config fails fast instead of
     // after the window is up.
     let file = match config::load(cli.config.as_deref()) {
@@ -101,8 +112,9 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
     };
     let input = if cli.script.is_empty() {
         window::Input::Stdin {
-            format: format(cli.json),
-            field: cli.field.clone(),
+            format,
+            field: cli.field,
+            print,
         }
     } else {
         window::Input::Script(cli.script)
@@ -111,9 +123,6 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
     let options = window::Options {
         prompt: cli.prompt,
         case,
-        index: cli.index,
-        json: cli.json,
-        field: cli.field,
         font,
         layout,
         theme,
@@ -131,55 +140,35 @@ fn pick(case: CaseMatching, cli: Cli) -> ExitCode {
     }
 }
 
-fn format(json: bool) -> format::Format {
-    if json {
-        format::Format::Json
-    } else {
-        format::Format::Plain
-    }
-}
-
 fn filter(
     case: CaseMatching,
     query: &str,
-    index: bool,
-    json: bool,
+    format: Format,
     field: Option<String>,
+    print: &Print,
 ) -> ExitCode {
     let mut matcher = Matcher::new(case, Arc::new(|| {}));
     matcher.set_query(query);
-    let reader = matcher::spawn_reader(
-        BufReader::new(io::stdin()),
-        matcher.injector(),
-        format(json),
-        field,
-        |_, _| {},
-    );
+    let reader =
+        matcher::spawn_reader(BufReader::new(io::stdin()), matcher.injector(), format, field, |_, _| {});
     // The worker going idle only means it caught up with what was injected so
     // far, so wait for EOF before draining it.
     if let Err(err) = reader.join().expect("reader thread panicked") {
         eprintln!("sieb: reading stdin: {err}");
         return ExitCode::from(2);
     }
-    while matcher.tick(10).running {}
+    matcher.settle(Duration::MAX);
 
     let mut out = BufWriter::new(io::stdout().lock());
-    let mut matched = false;
     for entry in matcher.matches() {
-        matched = true;
-        let res = match (&entry.raw, index) {
-            (_, true) => writeln!(out, "{}", entry.index),
-            (Some(raw), false) => writeln!(out, "{raw}"),
-            (None, false) => writeln!(out, "{}", entry.text),
-        };
         // A closed pipe (`sieb -f x | head`) is a normal way to stop.
-        if res.is_err() {
+        if writeln!(out, "{}", print.entry(entry)).is_err() {
             break;
         }
     }
     let _ = out.flush();
 
-    if matched {
+    if matcher.matched() > 0 {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

@@ -1,5 +1,4 @@
 use std::io::{self, BufRead};
-use std::ops::Range;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -8,38 +7,63 @@ use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Injector, Nucleo, Status};
 
 use crate::format::{self, Format, Line, Row};
-use crate::markup::Style;
 
-/// One input line, with its position in the input stream.
+/// One input row, with its position in the input stream.
 pub struct Entry {
     pub index: u32,
-    pub text: String,
-    /// Script mode: handed back to the script when this entry is picked.
-    pub info: Option<String>,
-    pub selectable: bool,
-    /// JSON input: the object this entry came from.
-    pub raw: Option<String>,
-    /// Styled byte ranges of `text`, from markup.
-    pub styles: Vec<(Range<usize>, Style)>,
+    pub row: Row,
 }
 
 /// Adds a row to the matcher. `meta` is matched but not shown, so it goes
 /// into the haystack after the text, where highlight indices past the
 /// visible text simply fall off the end.
 pub fn push(injector: &Injector<Entry>, index: u32, row: Row) {
-    let haystack = match &row.meta {
-        Some(meta) => format!("{} {meta}", row.text),
-        None => row.text.clone(),
-    };
-    let entry = Entry {
-        index,
-        text: row.text,
-        info: row.info,
-        selectable: row.selectable,
-        raw: row.raw,
-        styles: row.styles,
-    };
-    injector.push(entry, |_, columns| columns[0] = haystack.as_str().into());
+    injector.push(Entry { index, row }, |entry, columns| {
+        let row = &entry.row;
+        columns[0] = match &row.meta {
+            Some(meta) => format!("{} {meta}", row.text).into(),
+            None => row.text.as_str().into(),
+        };
+    });
+}
+
+/// What a pick prints in dmenu mode.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Print {
+    Text,
+    /// The position in the input, `-1` for typed text like rofi.
+    Index,
+    /// The JSON value the row came from. Typed text comes back as an
+    /// object with the text under `field`, `text` by default.
+    Json { field: Option<String> },
+}
+
+impl Print {
+    pub fn entry(&self, entry: &Entry) -> String {
+        match self {
+            Print::Text => entry.row.text.clone(),
+            Print::Index => entry.index.to_string(),
+            // The whole object, unknown fields included, so a pipeline gets
+            // back the record it put in.
+            Print::Json { .. } => entry
+                .row
+                .raw
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({ "text": entry.row.text }).to_string()),
+        }
+    }
+
+    pub fn query(&self, query: &str) -> String {
+        match self {
+            Print::Text => query.to_owned(),
+            Print::Index => "-1".into(),
+            // Under the shown key, so the record has the shape that went in.
+            Print::Json { field } => {
+                let key = field.as_deref().unwrap_or("text");
+                serde_json::json!({ key: query }).to_string()
+            }
+        }
+    }
 }
 
 pub struct Matcher {
@@ -93,6 +117,11 @@ impl Matcher {
     pub fn counts(&self) -> (u32, u32) {
         let snapshot = self.nucleo.snapshot();
         (snapshot.matched_item_count(), snapshot.item_count())
+    }
+
+    /// Number of matches, as of the last [`Matcher::tick`].
+    pub fn matched(&self) -> u32 {
+        self.counts().0
     }
 
     /// The match at `rank`, as of the last [`Matcher::tick`].
@@ -177,8 +206,28 @@ mod tests {
         while matcher.tick(10).running {}
         matcher
             .matches()
-            .map(|e| (e.index, e.text.clone()))
+            .map(|e| (e.index, e.row.text.clone()))
             .collect()
+    }
+
+    #[test]
+    fn print_picks_and_typed_text() {
+        let json = Row {
+            raw: Some(r#"{"name":"a.rs","size":1}"#.into()),
+            ..Row::plain("a.rs".into())
+        };
+        let entry = |row| Entry { index: 4, row };
+        let named = Print::Json {
+            field: Some("name".into()),
+        };
+        assert_eq!(Print::Text.entry(&entry(Row::plain("x".into()))), "x");
+        assert_eq!(Print::Index.entry(&entry(Row::plain("x".into()))), "4");
+        assert_eq!(named.entry(&entry(json)), r#"{"name":"a.rs","size":1}"#);
+        // A row that came in as plain text still prints as JSON.
+        let plain = Print::Json { field: None }.entry(&entry(Row::plain("x".into())));
+        assert_eq!(plain, r#"{"text":"x"}"#);
+        assert_eq!(Print::Index.query("typed"), "-1");
+        assert_eq!(named.query("typed"), r#"{"name":"typed"}"#);
     }
 
     #[test]

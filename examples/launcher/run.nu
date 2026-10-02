@@ -24,7 +24,7 @@ def launch [command: string] {
 
 def main [choice?: string] {
     match ($env.ROFI_RETV? | default "0") {
-        "0" => { programs | each { print $in } | ignore }
+        "0" => { programs | str join "\n" | print }
         _ => { launch $choice }
     }
 }

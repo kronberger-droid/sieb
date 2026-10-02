@@ -16,7 +16,7 @@ def list [dir: string] {
     }
     # Directories first, each group by name, hidden files last.
     ls --all --short-names $dir
-    | insert dir {|it| ($dir | path join $it.name | path type) == dir }
+    | insert dir {|it| $it.type == dir }
     | insert hidden {|it| $it.name | str starts-with "." }
     | sort-by hidden { not $in.dir } name
     | each {|it|

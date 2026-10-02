@@ -12,7 +12,6 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 
 use nucleo::Injector;
-use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
 use crate::format::{self, Format, Line};
 use crate::matcher::{self, Entry};
@@ -113,7 +112,7 @@ pub fn spawn(
     call: Call,
     id: u32,
     injector: Injector<Entry>,
-    events: Sender<Event>,
+    send: impl Fn(Event) + Send + 'static,
 ) -> io::Result<()> {
     let mut command = Command::new(script);
     command
@@ -131,22 +130,20 @@ pub fn spawn(
         };
     }
     let retv = (call.retv as u8).to_string();
-    for (name, value) in [
-        ("RETV", Some(retv.as_str())),
-        ("INFO", call.info.as_deref()),
-        ("DATA", call.data.as_deref()),
-        ("QUERY", Some(call.query.as_str())),
-    ] {
-        for prefix in ["SIEB_", "ROFI_"] {
-            if prefix == "ROFI_" && name == "QUERY" {
-                continue;
-            }
-            let var = format!("{prefix}{name}");
+    let vars: [(&[&str], Option<&str>); 4] = [
+        (&["SIEB_RETV", "ROFI_RETV"], Some(&retv)),
+        (&["SIEB_INFO", "ROFI_INFO"], call.info.as_deref()),
+        (&["SIEB_DATA", "ROFI_DATA"], call.data.as_deref()),
+        // rofi has no query variable.
+        (&["SIEB_QUERY"], Some(&call.query)),
+    ];
+    for (names, value) in vars {
+        for name in names {
             match value {
-                Some(value) => command.env(var, value),
+                Some(value) => command.env(name, value),
                 // Unset rather than inherited from a sieb that a script
                 // started, which would leak an unrelated value.
-                None => command.env_remove(var),
+                None => command.env_remove(name),
             };
         }
     }
@@ -158,20 +155,18 @@ pub fn spawn(
         // A read error ends the menu where it got to; the exit status
         // below still tells the UI how the script fared.
         let _ = format::feed(BufReader::new(stdout), Format::Rofi, None, |line| match line {
-            Line::Mode(key, value) => {
-                let _ = events.send(Event::Mode { call: id, key, value });
-            }
+            Line::Mode(key, value) => send(Event::Mode { call: id, key, value }),
             Line::Row(row) => {
                 matcher::push(&injector, rows, row);
                 if rows == 0 {
-                    let _ = events.send(Event::FirstRow { call: id });
+                    send(Event::FirstRow { call: id });
                 }
                 rows += 1;
             }
         });
         // Waiting reaps the child; a failed wait reads as a failed script.
         let status = child.wait().unwrap_or_else(|_| failed_status());
-        let _ = events.send(Event::Done {
+        send(Event::Done {
             call: id,
             status,
             rows,
@@ -194,9 +189,8 @@ mod tests {
     fn run(body: &str, call: Call) -> (Vec<String>, Vec<Event>) {
         use crate::matcher::Matcher;
         use nucleo::pattern::CaseMatching;
-        use smithay_client_toolkit::reexports::calloop::{EventLoop, channel};
         use std::os::unix::fs::PermissionsExt;
-        use std::sync::Arc;
+        use std::sync::{Arc, mpsc};
 
         let dir = std::env::temp_dir().join(format!("sieb-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -205,30 +199,20 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let mut matcher = Matcher::new(CaseMatching::Smart, Arc::new(|| {}));
-        let (sender, receiver) = channel::channel();
-        spawn(&path, call, 7, matcher.injector(), sender).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let send = move |event| {
+            let _ = sender.send(event);
+        };
+        spawn(&path, call, 7, matcher.injector(), send).unwrap();
 
-        let mut event_loop: EventLoop<Vec<Event>> = EventLoop::try_new().unwrap();
-        event_loop
-            .handle()
-            .insert_source(receiver, |event, _, events: &mut Vec<Event>| {
-                if let channel::Event::Msg(event) = event {
-                    events.push(event);
-                }
-            })
-            .unwrap();
         let mut events = Vec::new();
         while !events.iter().any(|e| matches!(e, Event::Done { .. })) {
-            event_loop.dispatch(None, &mut events).unwrap();
+            events.push(receiver.recv().unwrap());
         }
         matcher.settle(std::time::Duration::from_secs(1));
-        let rows = matcher.matches().map(|e| e.text.clone()).collect();
+        let rows = matcher.matches().map(|e| e.row.text.clone()).collect();
         let _ = std::fs::remove_file(path);
         (rows, events)
-    }
-
-    fn initial() -> Call {
-        Call::initial()
     }
 
     #[test]
@@ -244,7 +228,7 @@ mod tests {
 
     #[test]
     fn rows_options_and_exit() {
-        let (rows, events) = run(r"printf '\0prompt\037Power\n'; echo Shutdown; echo Reboot", initial());
+        let (rows, events) = run(r"printf '\0prompt\037Power\n'; echo Shutdown; echo Reboot", Call::initial());
         assert_eq!(rows, ["Shutdown", "Reboot"]);
         assert!(matches!(&events[0], Event::Mode { call: 7, key, value } if key == "prompt" && value == "Power"));
         assert!(matches!(events[1], Event::FirstRow { call: 7 }));
@@ -268,7 +252,7 @@ mod tests {
 
     #[test]
     fn unset_info_is_not_inherited() {
-        let (rows, _) = run(r#"echo "[${ROFI_INFO-unset}]""#, initial());
+        let (rows, _) = run(r#"echo "[${ROFI_INFO-unset}]""#, Call::initial());
         assert_eq!(rows, ["[unset]"]);
     }
 
@@ -277,13 +261,13 @@ mod tests {
         // Safety: tests run as threads of one process, and no other test
         // reads this variable.
         unsafe { std::env::set_var("XDG_ACTIVATION_TOKEN", "stale") };
-        let (rows, _) = run(r#"echo "[${XDG_ACTIVATION_TOKEN-unset}]""#, initial());
+        let (rows, _) = run(r#"echo "[${XDG_ACTIVATION_TOKEN-unset}]""#, Call::initial());
         assert_eq!(rows, ["[unset]"]);
     }
 
     #[test]
     fn silent_failure_reports_status() {
-        let (rows, events) = run("exit 3", initial());
+        let (rows, events) = run("exit 3", Call::initial());
         assert!(rows.is_empty());
         assert!(matches!(events[0], Event::Done { rows: 0, status, .. } if status.code() == Some(3)));
     }

@@ -60,7 +60,7 @@ use smithay_client_toolkit::{
 };
 
 use crate::format::Format;
-use crate::matcher::{self, Matcher};
+use crate::matcher::{self, Matcher, Print};
 use crate::script::{self, Call, Mode, Retv};
 use crate::picker::{Accept, Picker, Wheel};
 use crate::layout::Layout;
@@ -72,11 +72,6 @@ use crate::text::Text;
 pub struct Options {
     pub prompt: Option<String>,
     pub case: CaseMatching,
-    pub index: bool,
-    /// Print the selection as JSON (dmenu mode with `--json`).
-    pub json: bool,
-    /// `--text`: the JSON key rows are shown by, and typed text comes back as.
-    pub field: Option<String>,
     pub font: String,
     pub layout: Layout,
     pub theme: Theme,
@@ -84,11 +79,30 @@ pub struct Options {
 
 /// What fills the list.
 pub enum Input {
-    /// dmenu mode: rows from stdin, JSON records shown by `field`.
-    Stdin { format: Format, field: Option<String> },
+    /// dmenu mode: rows from stdin, JSON records shown by `field`, and the
+    /// pick printed as `print` says.
+    Stdin {
+        format: Format,
+        field: Option<String>,
+        print: Print,
+    },
     /// Script mode: run a script for each menu, starting with the first.
     /// More than one makes them modes with buttons to switch between.
     Script(Vec<Mode>),
+}
+
+/// Where a left press landed. A click needs press and release on the same.
+#[derive(Clone, Copy, PartialEq)]
+enum Press {
+    Row(usize),
+    Button(usize),
+}
+
+/// Menu options and script progress, into the event loop.
+enum Event {
+    /// A menu option from stdin, which has no calls to tie it to.
+    Option(String, String),
+    Script(script::Event),
 }
 
 /// How the window was closed.
@@ -100,9 +114,6 @@ pub enum Outcome {
     Quit,
     Failed(String),
 }
-
-/// Call id for menu options read from stdin in dmenu mode.
-const STDIN: u32 = u32::MAX;
 
 /// Options a script sets for its menu with `\0key\x1fvalue` lines, or
 /// JSON input with an object without `text`.
@@ -130,8 +141,9 @@ impl Menu {
             "no-custom" => self.no_custom = value == "true",
             "keep-filter" => self.keep_filter = value == "true",
             "data" => self.data = Some(value),
-            // markup-rows, urgent, active, use-hot-keys, keep-selection,
-            // delim, theme: not yet.
+            // markup-rows is applied while reading rows (format::feed).
+            // urgent, active, use-hot-keys, keep-selection, delim, theme:
+            // not yet.
             _ => {}
         }
     }
@@ -144,22 +156,40 @@ struct Pending {
     id: u32,
     matcher: Matcher,
     menu: Menu,
-    /// The first call of a mode switched to: keeps the query, like rofi,
-    /// and shows an empty list rather than closing if it prints nothing.
-    switch: bool,
+    /// Why the call runs. An initial call after the first one is a mode
+    /// switch: it keeps the query, like rofi, and shows an empty list
+    /// rather than closing if it prints nothing.
+    retv: Retv,
+}
+
+impl Pending {
+    fn is_switch(&self) -> bool {
+        self.retv == Retv::Initial && self.id > FIRST_CALL
+    }
+}
+
+/// Id of the very first call, which builds the first menu.
+const FIRST_CALL: u32 = 1;
+
+/// What the script side is doing. One call at a time.
+enum Busy {
+    Idle,
+    /// A picked call waiting for its activation token before it runs.
+    AwaitingToken(Call),
+    Running(Pending),
 }
 
 struct ScriptState {
     modes: Vec<Mode>,
     /// The mode whose script runs.
     active: usize,
-    events: Sender<script::Event>,
+    events: Sender<Event>,
+    case: CaseMatching,
+    notify: Arc<dyn Fn() + Send + Sync>,
     next_id: u32,
     /// The call whose menu is on screen.
     visible: Option<u32>,
-    pending: Option<Pending>,
-    /// A picked call waiting for its activation token before it runs.
-    awaiting_token: Option<Call>,
+    busy: Busy,
 }
 
 /// Wakes the event loop when the matcher has new results.
@@ -190,13 +220,19 @@ pub fn wake() -> io::Result<Wake> {
     })
 }
 
-pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dyn Error>> {
+pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dyn Error>> {
     // Input starts streaming before anything else, so it arrives while
     // fonts load and the window maps.
     let (events, event_channel) = channel::channel();
     let mut script = None;
+    let mut print = Print::Text;
     let matcher = match input {
-        Input::Stdin { format, field } => {
+        Input::Stdin {
+            format,
+            field,
+            print: how,
+        } => {
+            print = how;
             let matcher = Matcher::new(options.case, wake.notify.clone());
             // Read errors just end the list; there is no one to report
             // them to mid-pick.
@@ -206,37 +242,33 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
                 format,
                 field,
                 move |key, value| {
-                    let _ = events.send(script::Event::Mode {
-                        call: STDIN,
-                        key,
-                        value,
-                    });
+                    let _ = events.send(Event::Option(key, value));
                 },
             );
             matcher
         }
         Input::Script(modes) => {
-            options.layout.buttons = modes.len();
             let mut state = ScriptState {
                 modes,
                 active: 0,
                 events,
-                // Ids start past the initial menu, which shows nothing.
-                next_id: 1,
+                case: options.case,
+                notify: wake.notify.clone(),
+                next_id: FIRST_CALL,
                 visible: None,
-                pending: None,
-                awaiting_token: None,
+                busy: Busy::Idle,
             };
             // No token: the first menu launches nothing.
-            state
-                .start(Call::initial(), options.case, &wake.notify, false)
-                .map_err(|err| format!("{}: {err}", state.path().display()))?;
+            state.start(Call::initial())?;
             script = Some(state);
             // Shown until the first menu arrives.
             Matcher::new(options.case, wake.notify.clone())
         }
     };
-    let text = Text::load(&options.font)?;
+    // fontconfig takes a while and needs nothing from the compositor, so
+    // it runs alongside the connection and the first roundtrips.
+    let font = options.font.clone();
+    let text = std::thread::spawn(move || Text::load(&font).map_err(|err| err.to_string()));
 
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
@@ -280,6 +312,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
     let (pw, ph) = options.layout.size();
     // Room for two buffers at scale 2 before the pool has to grow.
     let pool = SlotPool::new(pw as usize * ph as usize * 4 * 8, &shm)?;
+    let text = text.join().expect("font thread panicked")?;
     let mut app = App {
         registry: RegistryState::new(&globals),
         seats: SeatState::new(&globals, &qh),
@@ -303,12 +336,11 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         picker: Picker::new(options.layout.lines),
         script,
         menu: Menu::default(),
-        notify: wake.notify.clone(),
+        print,
         wheel: Wheel::default(),
         hovered: None,
         pointer_at: None,
-        pressed: None,
-        pressed_button: None,
+        press: None,
         options,
         matcher,
         text,
@@ -340,7 +372,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         .handle()
         .insert_source(event_channel, |event, _, app: &mut App| {
             if let channel::Event::Msg(event) = event {
-                app.script_event(event);
+                app.event(event);
             }
         })
         .map_err(|err| err.error)?;
@@ -378,16 +410,15 @@ struct App {
     script: Option<ScriptState>,
     /// Options of the script menu on screen.
     menu: Menu,
-    notify: Arc<dyn Fn() + Send + Sync>,
+    /// dmenu mode: what a pick prints.
+    print: Print,
     wheel: Wheel,
     /// Visible row under the pointer, to act only when it changes.
     hovered: Option<usize>,
     /// Last pointer position on the panel.
     pointer_at: Option<(f64, f64)>,
-    /// Visible row a left press started on.
-    pressed: Option<usize>,
-    /// Mode button a left press started on.
-    pressed_button: Option<usize>,
+    /// What a left press started on.
+    press: Option<Press>,
     text: Text,
     /// A frame callback is outstanding; draw again when it fires.
     frame_pending: bool,
@@ -419,7 +450,7 @@ impl App {
     /// Picks up new matcher results.
     fn refresh(&mut self) {
         let status = self.matcher.tick(0);
-        self.picker.clamp(self.matcher.counts().0);
+        self.picker.clamp(self.matcher.matched());
         if status.changed {
             self.redraw();
         }
@@ -434,7 +465,7 @@ impl App {
 
     fn key(&mut self, event: KeyEvent) {
         let ctrl = self.modifiers.ctrl;
-        let count = self.matcher.counts().0;
+        let count = self.matcher.matched();
         // Letters compare both cases, since Caps Lock uppercases the keysym.
         let is = |lower: Keysym, upper: Keysym| {
             ctrl && (event.keysym == lower || event.keysym == upper)
@@ -449,7 +480,7 @@ impl App {
                 // Right after typing, the snapshot may still rank the previous
                 // query, and Enter would pick from the wrong list.
                 self.matcher.settle(Duration::from_millis(150));
-                let count = self.matcher.counts().0;
+                let count = self.matcher.matched();
                 self.picker.clamp(count);
                 let accept = self.picker.accept(count, self.modifiers.shift);
                 self.accept(accept);
@@ -490,13 +521,7 @@ impl App {
     /// The match rank shown in visible row `row`, if that row has one.
     fn rank_at(&self, row: usize) -> Option<u32> {
         let rank = self.picker.scroll() + row as u32;
-        (rank < self.matcher.counts().0).then_some(rank)
-    }
-
-    fn accept_rank(&mut self, rank: u32) {
-        // The rank is what the user sees, so no settling: it comes from the
-        // snapshot that was drawn.
-        self.accept(Accept::Match(rank));
+        (rank < self.matcher.matched()).then_some(rank)
     }
 
     /// Enter or a click: print and exit in dmenu mode, call the script in
@@ -508,14 +533,14 @@ impl App {
         };
         // One call at a time: a second Enter while the script works is
         // dropped rather than queued against a menu that is about to go.
-        if script.pending.is_some() || script.awaiting_token.is_some() {
+        if !matches!(script.busy, Busy::Idle) {
             return;
         }
         let query = self.picker.query();
         let (retv, arg, info) = match accept {
             Accept::Match(rank) => match self.matcher.get(rank) {
-                Some(entry) if entry.selectable => {
-                    (Retv::Entry, entry.text.as_str(), entry.info.clone())
+                Some(entry) if entry.row.selectable => {
+                    (Retv::Entry, entry.row.text.as_str(), entry.row.info.clone())
                 }
                 _ => return,
             },
@@ -533,7 +558,7 @@ impl App {
         // Any call may launch something, and only the script knows which.
         // The token comes back in `new_token`, which then starts the call.
         if let (Some(activation), Some(seat)) = (&self.activation, &self.seat) {
-            script.awaiting_token = Some(call);
+            script.busy = Busy::AwaitingToken(call);
             activation.request_token(
                 &self.qh,
                 RequestData {
@@ -544,16 +569,16 @@ impl App {
                 },
             );
         } else {
-            self.start_call(call);
+            self.start(call);
         }
     }
 
-    fn start_call(&mut self, call: Call) {
-        let Some(script) = &mut self.script else {
-            return;
-        };
-        if let Err(err) = script.start(call, self.options.case, &self.notify, false) {
-            self.outcome = Some(Outcome::Failed(format!("{}: {err}", script.path().display())));
+    /// Runs `call`, or ends sieb with the reason it could not.
+    fn start(&mut self, call: Call) {
+        if let Some(script) = &mut self.script
+            && let Err(err) = script.start(call)
+        {
+            self.outcome = Some(Outcome::Failed(err));
         }
     }
 
@@ -576,14 +601,11 @@ impl App {
             return;
         }
         script.active = to;
-        script.awaiting_token = None;
         let call = Call {
             query: self.picker.query().to_owned(),
             ..Call::initial()
         };
-        if let Err(err) = script.start(call, self.options.case, &self.notify, true) {
-            self.outcome = Some(Outcome::Failed(format!("{}: {err}", script.path().display())));
-        }
+        self.start(call);
         // The button follows right away, the list once rows arrive.
         self.redraw();
     }
@@ -593,9 +615,10 @@ impl App {
         if let Some(script) = &mut self.script {
             script.visible = Some(pending.id);
         }
+        let keep_query = pending.menu.keep_filter || pending.is_switch();
         self.matcher = pending.matcher;
         self.menu = pending.menu;
-        if !self.menu.keep_filter && !pending.switch {
+        if !keep_query {
             self.picker.clear();
         }
         self.picker.clamp(0);
@@ -606,37 +629,43 @@ impl App {
             // be in flight: give the matcher a moment so a selection near
             // the end has a row to land on.
             self.matcher.settle(Duration::from_millis(50));
-            self.picker.select(rank, self.matcher.counts().0);
+            self.picker.select(rank, self.matcher.matched());
         }
         self.redraw();
     }
 
-    fn script_event(&mut self, event: script::Event) {
-        if let script::Event::Mode { call, key, value } = event {
-            let pending = self.script.as_mut().and_then(|s| s.pending.as_mut());
-            if let Some(pending) = pending.filter(|p| p.id == call) {
-                pending.menu.set(&key, value);
-            } else if self.script.as_ref().is_none_or(|s| s.visible == Some(call)) {
+    fn event(&mut self, event: Event) {
+        let event = match event {
+            Event::Option(key, value) => {
                 self.menu.set(&key, value);
                 self.redraw();
+                return;
             }
-            return;
-        }
+            Event::Script(event) => event,
+        };
         let Some(script) = &mut self.script else {
             return;
         };
         match event {
-            script::Event::Mode { .. } => unreachable!("handled above"),
+            // Options for the call on its way in, or the one on screen.
+            script::Event::Mode { call, key, value } => match &mut script.busy {
+                Busy::Running(pending) if pending.id == call => pending.menu.set(&key, value),
+                _ if script.visible == Some(call) => {
+                    self.menu.set(&key, value);
+                    self.redraw();
+                }
+                _ => {}
+            },
             script::Event::FirstRow { call } => {
-                if let Some(pending) = script.pending.take_if(|p| p.id == call) {
+                if let Some(pending) = script.take_running(call) {
                     self.show(pending);
                 }
             }
             script::Event::Done { call, status, rows } => {
                 let path = script.path().display().to_string();
-                match script.pending.take_if(|p| p.id == call) {
+                match script.take_running(call) {
                     // A mode with nothing to list still gets its screen.
-                    Some(pending) if pending.switch => self.show(pending),
+                    Some(pending) if pending.is_switch() => self.show(pending),
                     // Rows would have shown the menu already, so this call
                     // printed nothing: the script is done.
                     Some(_) => {
@@ -669,29 +698,31 @@ impl App {
     }
 
     fn output(&self, accept: Accept) -> String {
-        let (index, json) = (self.options.index, self.options.json);
         match accept {
-            Accept::Match(rank) => match self.matcher.get(rank) {
-                Some(entry) if index => entry.index.to_string(),
-                // The whole object, unknown fields included, so a pipeline
-                // gets back the record it put in.
-                Some(entry) if json => entry
-                    .raw
-                    .clone()
-                    .unwrap_or_else(|| serde_json::json!({ "text": entry.text }).to_string()),
-                Some(entry) => entry.text.clone(),
-                None => String::new(),
-            },
-            // Typed text has no position in the input. -1 like rofi.
-            Accept::Query if index => "-1".into(),
-            // Under the shown key, so the record has the shape that went in.
-            Accept::Query if json => {
-                let key = self.options.field.as_deref().unwrap_or("text");
-                let mut record = serde_json::Map::new();
-                record.insert(key.to_owned(), self.picker.query().into());
-                serde_json::Value::Object(record).to_string()
-            }
-            Accept::Query => self.picker.query().to_owned(),
+            Accept::Match(rank) => self
+                .matcher
+                .get(rank)
+                .map_or_else(String::new, |entry| self.print.entry(entry)),
+            Accept::Query => self.print.query(self.picker.query()),
+        }
+    }
+
+    /// The row or mode button at surface position (`x`, `y`).
+    fn press_at(&self, (x, y): (f64, f64)) -> Option<Press> {
+        let layout = self.layout();
+        layout
+            .row_at(y)
+            .map(Press::Row)
+            .or_else(|| layout.button_at(x, y).map(Press::Button))
+    }
+
+    /// The layout of the frame on screen. Drawing and hit-testing both use
+    /// it, so a click always lands where the last frame put things.
+    fn layout(&self) -> Layout {
+        Layout {
+            message: self.menu.message.is_some(),
+            buttons: self.script.as_ref().map_or(0, |s| s.modes.len()),
+            ..self.options.layout
         }
     }
 
@@ -710,8 +741,8 @@ impl App {
             return;
         };
         self.dirty = false;
-        self.options.layout.message = self.menu.message.is_some();
-        let (pw, ph) = self.options.layout.size();
+        let layout = self.layout();
+        let (pw, ph) = layout.size();
         let (pw, ph) = (pw.min(width), ph.min(height));
         // Buffer sizes round half away from zero, as wp_fractional_scale asks.
         let bw = (pw as f64 * self.scale).round() as i32;
@@ -734,8 +765,8 @@ impl App {
             rows: rows
                 .into_iter()
                 .map(|(entry, indices)| render::RowView {
-                    text: &entry.text,
-                    styles: &entry.styles,
+                    text: &entry.row.text,
+                    styles: &entry.row.styles,
                     indices,
                 })
                 .collect(),
@@ -761,7 +792,7 @@ impl App {
             bw as u32,
             bh as u32,
             self.scale as f32,
-            &self.options.layout,
+            &layout,
             &self.options.theme,
             &mut self.text,
             &view,
@@ -801,24 +832,37 @@ impl App {
 impl ScriptState {
     /// Starts the next call. Its rows go into a fresh matcher that replaces
     /// the visible one once the first row arrives.
-    fn start(
-        &mut self,
-        call: Call,
-        case: CaseMatching,
-        notify: &Arc<dyn Fn() + Send + Sync>,
-        switch: bool,
-    ) -> io::Result<()> {
+    /// Whatever was running or waiting is dropped: its late events no
+    /// longer match a call id.
+    fn start(&mut self, call: Call) -> Result<(), String> {
         let id = self.next_id;
         self.next_id += 1;
-        let matcher = Matcher::new(case, notify.clone());
-        script::spawn(self.path(), call, id, matcher.injector(), self.events.clone())?;
-        self.pending = Some(Pending {
+        let retv = call.retv;
+        let matcher = Matcher::new(self.case, self.notify.clone());
+        let events = self.events.clone();
+        let send = move |event| {
+            let _ = events.send(Event::Script(event));
+        };
+        script::spawn(self.path(), call, id, matcher.injector(), send)
+            .map_err(|err| format!("{}: {err}", self.path().display()))?;
+        self.busy = Busy::Running(Pending {
             id,
             matcher,
             menu: Menu::default(),
-            switch,
+            retv,
         });
         Ok(())
+    }
+
+    /// The running call `id`, which is done waiting.
+    fn take_running(&mut self, id: u32) -> Option<Pending> {
+        match std::mem::replace(&mut self.busy, Busy::Idle) {
+            Busy::Running(pending) if pending.id == id => Some(pending),
+            other => {
+                self.busy = other;
+                None
+            }
+        }
     }
 
     fn path(&self) -> &Path {
@@ -858,9 +902,12 @@ impl ActivationHandler for App {
     /// The compositor always answers, with a token it may later refuse to
     /// honor, so the waiting call never hangs here.
     fn new_token(&mut self, token: String, _: &RequestData<()>) {
-        let call = self.script.as_mut().and_then(|s| s.awaiting_token.take());
-        if let Some(call) = call {
-            self.start_call(Call {
+        let Some(script) = &mut self.script else {
+            return;
+        };
+        // A mode switch in the meantime has dropped the call.
+        if let Busy::AwaitingToken(call) = std::mem::replace(&mut script.busy, Busy::Idle) {
+            self.start(Call {
                 token: Some(token),
                 ..call
             });
@@ -1105,11 +1152,11 @@ impl PointerHandler for App {
                     if self.pointer_at.replace(event.position) == Some(event.position) {
                         continue;
                     }
-                    let row = self.options.layout.row_at(event.position.1);
+                    let row = self.layout().row_at(event.position.1);
                     if row != self.hovered {
                         self.hovered = row;
                         if let Some(rank) = row.and_then(|row| self.rank_at(row)) {
-                            let count = self.matcher.counts().0;
+                            let count = self.matcher.matched();
                             self.picker.select(rank, count);
                             self.redraw();
                         }
@@ -1118,25 +1165,23 @@ impl PointerHandler for App {
                 PointerEventKind::Leave { .. } => self.hovered = None,
                 PointerEventKind::Press { button: BTN_LEFT, serial, .. } => {
                     self.serial = serial;
-                    let (x, y) = event.position;
-                    self.pressed = self.options.layout.row_at(y);
-                    self.pressed_button = self.options.layout.button_at(x, y);
+                    self.press = self.press_at(event.position);
                 }
                 // Single click accepts. Wayland has no double click, and
                 // inventing a threshold would ignore the user's settings.
                 PointerEventKind::Release { button: BTN_LEFT, .. } => {
-                    let (x, y) = event.position;
-                    let button = self.options.layout.button_at(x, y);
-                    if let Some(button) = button
-                        && Some(button) == self.pressed_button.take()
-                    {
-                        self.switch_mode(button);
-                    }
-                    let row = self.options.layout.row_at(event.position.1);
-                    if row.is_some() && row == self.pressed.take()
-                        && let Some(rank) = row.and_then(|row| self.rank_at(row))
-                    {
-                        self.accept_rank(rank);
+                    let press = self.press.take();
+                    match self.press_at(event.position) {
+                        released if released != press => {}
+                        Some(Press::Button(button)) => self.switch_mode(button),
+                        // The rank is what the user sees, so no settling:
+                        // it comes from the snapshot that was drawn.
+                        Some(Press::Row(row)) => {
+                            if let Some(rank) = self.rank_at(row) {
+                                self.accept(Accept::Match(rank));
+                            }
+                        }
+                        None => {}
                     }
                 }
                 PointerEventKind::Axis { vertical, .. } => {
@@ -1147,7 +1192,7 @@ impl PointerHandler for App {
                         self.options.layout.row() as f64,
                     );
                     if steps != 0 {
-                        let count = self.matcher.counts().0;
+                        let count = self.matcher.matched();
                         self.move_by(steps, count);
                     }
                 }

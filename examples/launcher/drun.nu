@@ -22,11 +22,15 @@ def parse-entry [path: string] {
     | take until { str starts-with "[" }
     | parse "{key}={value}"
     | where key !~ '\['
-    | reduce --fold {} {|it, acc| $acc | upsert ($it.key | str trim) ($it.value | str trim) }
+    | update key { str trim }
+    | update value { str trim }
+    # The first of a repeated key wins, and the pairs become one record
+    # in one go rather than one rebuild per key.
+    | uniq-by key
+    | transpose --header-row --as-record
 }
 
-def visible [entry: record] {
-    let desktops = $env.XDG_CURRENT_DESKTOP? | default "" | split row ":"
+def visible [entry: record, desktops: list<string>] {
     let only = $entry.OnlyShowIn? | default "" | split row ";" | where { is-not-empty }
     let not = $entry.NotShowIn? | default "" | split row ";" | where { is-not-empty }
     (
@@ -40,6 +44,7 @@ def visible [entry: record] {
 }
 
 def entries [] {
+    let desktops = $env.XDG_CURRENT_DESKTOP? | default "" | split row ":"
     data-dirs
     | each {|dir| $dir | path join applications }
     | where { path exists }
@@ -52,8 +57,9 @@ def entries [] {
     }
     | flatten
     | uniq-by id
-    | each {|it| parse-entry $it.path | insert path $it.path }
-    | where {|entry| visible $entry }
+    # Files are independent, so parse them in parallel; sorting follows.
+    | par-each {|it| parse-entry $it.path | insert path $it.path }
+    | where {|entry| visible $entry $desktops }
     | sort-by Name
 }
 
