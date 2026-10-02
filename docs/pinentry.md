@@ -26,6 +26,8 @@ clear it all, since words mean nothing in hidden text).
 `$XDG_CONFIG_HOME/sieb/pinentry.toml` themes it, with the keys of
 [`config.toml`](theming.md). Without that file it uses `config.toml`,
 minus the placeholder. `lines` and `counter` are ignored: there is no list.
+A file that does not load is reported on stderr and the prompt opens in
+the default look, so a theme mistake cannot lock you out.
 
 ## What it protects
 
@@ -41,5 +43,8 @@ minus the placeholder. `lines` and `counter` are ignored: there is no list.
 
 Two copies are outside its reach: each key press arrives as a short string
 from the keyboard library, and the client holds the password once it has
-it. The panel takes the keyboard exclusively while it is open, so other
-Wayland clients do not see the typing.
+it. The panel asks for the keyboard exclusively while it is open, so other
+Wayland clients do not see the typing. Another exclusive panel already up
+(a picker that triggered the prompt) may keep the keyboard, depending on
+the compositor; until the panel has it, the input reads "no keyboard:
+typing goes elsewhere" instead of dots.

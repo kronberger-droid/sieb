@@ -180,6 +180,10 @@ const ALTERNATE_EXIT: u8 = 10;
 /// What password mode shows for each typed character.
 const DOT: &str = "\u{2022}";
 
+/// What password mode shows in place of the dots while another surface has
+/// the keyboard, so the password is not typed blind into it.
+const NO_FOCUS: &str = "no keyboard: typing goes elsewhere";
+
 /// Id of the very first call, which builds the first menu.
 const FIRST_CALL: u32 = 1;
 
@@ -379,6 +383,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         pointer: None,
         shape_device: None,
         modifiers: Modifiers::default(),
+        focused: false,
         outcome: None,
     };
 
@@ -462,6 +467,11 @@ struct App {
     pointer: Option<wl_pointer::WlPointer>,
     shape_device: Option<WpCursorShapeDeviceV1>,
     modifiers: Modifiers,
+    /// Between the keyboard's enter and leave. Exclusive interactivity is a
+    /// request: with another exclusive overlay up (a picker that was open
+    /// when rbw asked for the password) the compositor may keep the
+    /// keyboard there, so this starts false until the compositor says so.
+    focused: bool,
     outcome: Option<Outcome>,
 }
 
@@ -805,6 +815,16 @@ impl App {
         }
     }
 
+    /// Only password mode shows focus, so only it redraws on a change.
+    fn set_focused(&mut self, focused: bool) {
+        if focused != self.focused {
+            self.focused = focused;
+            if self.secret.is_some() {
+                self.redraw();
+            }
+        }
+    }
+
     /// Draws now, or once the compositor wants the next frame. Keeps a
     /// fast stdin from rendering more often than the display refreshes.
     fn redraw(&mut self) {
@@ -833,7 +853,13 @@ impl App {
         let rows = self.matcher.window(scroll, self.picker.lines());
         // Password mode draws a dot per character and never the secret, so
         // it stays out of shaping, glyph caches and the buffer alike.
-        let dots = self.secret.as_ref().map(|secret| DOT.repeat(secret.len()));
+        let dots = self.secret.as_ref().map(|secret| {
+            if self.focused {
+                DOT.repeat(secret.len())
+            } else {
+                NO_FOCUS.to_owned()
+            }
+        });
         let view = View {
             // As in rofi, a mode's name is its prompt unless it sets one.
             prompt: self
@@ -1138,6 +1164,7 @@ impl KeyboardHandler for App {
         _: &[u32],
         _: &[Keysym],
     ) {
+        self.set_focused(true);
     }
 
     fn leave(
@@ -1148,6 +1175,7 @@ impl KeyboardHandler for App {
         _: &wl_surface::WlSurface,
         _: u32,
     ) {
+        self.set_focused(false);
     }
 
     fn press_key(
