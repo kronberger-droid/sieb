@@ -38,10 +38,9 @@
   in {
     packages = forAllSystems (system: let
       pkgs = pkgsFor system;
-    in {
       # nixpkgs' rustPlatform rather than the overlay toolchain, so the package
       # builds the same anywhere. Toolchain currency is a dev-shell concern.
-      default = pkgs.rustPlatform.buildRustPackage {
+      sieb = pkgs.rustPlatform.buildRustPackage {
         pname = "sieb";
         inherit version;
         src = self;
@@ -63,6 +62,20 @@
           mainProgram = "sieb";
         };
       };
+    in {
+      default = sieb;
+      # Just the pinentry, for `lib.getExe`: home-manager's
+      # `programs.rbw.settings.pinentry` takes a package and resolves it that
+      # way. A link into the one build rather than a meta override, since
+      # stdenv bakes mainProgram into the derivation as NIX_MAIN_PROGRAM and
+      # any override of it would compile sieb a second time.
+      pinentry =
+        pkgs.runCommandLocal "sieb-pinentry-${version}" {
+          meta = sieb.meta // {mainProgram = "sieb-pinentry";};
+        } ''
+          mkdir -p $out/bin
+          ln -s ${sieb}/bin/sieb-pinentry $out/bin/sieb-pinentry
+        '';
     });
 
     devShells = forAllSystems (system: let
