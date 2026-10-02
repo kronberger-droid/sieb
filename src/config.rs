@@ -415,11 +415,16 @@ pub fn load(path: Option<&Path>) -> Result<Appearance, Box<dyn Error>> {
 }
 
 fn default_path() -> Option<PathBuf> {
+    Some(dir()?.join("config.toml"))
+}
+
+/// sieb's config directory, `$XDG_CONFIG_HOME/sieb`.
+pub fn dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("sieb/config.toml"))
+    Some(base.join("sieb"))
 }
 
 #[derive(Debug)]

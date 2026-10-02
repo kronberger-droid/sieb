@@ -1,5 +1,6 @@
 //! sieb's picker, shared by the `sieb` and `sieb-pinentry` binaries.
 
+pub mod assuan;
 pub mod config;
 pub mod format;
 pub mod layout;
