@@ -29,6 +29,14 @@ fn main() -> ExitCode {
     let appearance = config::load(pinentry.as_deref())
         .map_err(|err| err.to_string())
         .and_then(|file| Appearance::default().over(file).resolve());
+    // A broken theme must not lock anyone out of the vault: exiting here
+    // leaves the client nothing to report but an EOF, with the reason on a
+    // stderr nobody reads. Prompt in the default look instead.
+    let fallback = appearance.is_err();
+    let appearance = appearance.or_else(|err| {
+        eprintln!("sieb-pinentry: {err}; using the default look");
+        Appearance::default().resolve()
+    });
     let (font, layout, mut theme) = match appearance {
         Ok(resolved) => resolved,
         Err(err) => {
@@ -36,7 +44,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if pinentry.is_none() {
+    if pinentry.is_none() || fallback {
         theme.placeholder.clear();
     }
 
