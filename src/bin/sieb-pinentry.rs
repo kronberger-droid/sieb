@@ -61,7 +61,14 @@ fn main() -> ExitCode {
             message: prompt.message(),
         };
         match window::run(options, input, wake) {
-            Ok(window::Outcome::Secret(pin)) => Answer::Pin(pin),
+            Ok(window::Outcome::Secret(pin)) => {
+                if !pin.is_locked() {
+                    // Usually RLIMIT_MEMLOCK. Asking anyway beats locking
+                    // the user out of their vault, but it should be known.
+                    eprintln!("sieb-pinentry: could not lock the password out of swap");
+                }
+                Answer::Pin(pin)
+            }
             Ok(window::Outcome::Failed(err)) => Answer::Failed(err),
             Err(err) => Answer::Failed(err.to_string()),
             Ok(_) => Answer::Cancel,

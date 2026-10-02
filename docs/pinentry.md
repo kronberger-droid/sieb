@@ -11,6 +11,10 @@ in rbw's `config.json`, or `pinentry-program /path/to/sieb-pinentry` in
 `gpg-agent.conf`. The flags those clients pass (`--timeout`, `--ttyname`,
 `--display`, ...) are accepted and ignored.
 
+It is tested against rbw. gpg-agent's password prompts work the same
+way, but its `CONFIRM` and `MESSAGE` dialogs are not implemented and
+answer as unknown commands.
+
 The panel shows the client's prompt and one line of text: the error from
 the last attempt if there is one, else the description. Typing shows as
 dots. Enter submits, Escape, Ctrl+C, Ctrl+G or a click outside cancels,
@@ -25,8 +29,10 @@ minus the placeholder. `lines` and `counter` are ignored: there is no list.
 
 ## What it protects
 
-- The password lives in one buffer of fixed size that is locked out of
-  swap, never reallocated, and zeroed on every edit and on exit.
+- The password lives in one buffer of fixed size that is never
+  reallocated and is zeroed on every edit and on exit. It is locked out
+  of swap where the system allows (`RLIMIT_MEMLOCK`); when it does not,
+  sieb-pinentry says so on stderr and asks anyway.
 - It is never drawn: the panel shapes a dot per character, so the text
   stays out of the glyph cache and the frame.
 - The process is not dumpable, so it leaves no core file and same-user
