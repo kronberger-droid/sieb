@@ -8,5 +8,6 @@ pub mod matcher;
 pub mod picker;
 pub mod render;
 pub mod script;
+pub mod secret;
 pub mod text;
 pub mod window;

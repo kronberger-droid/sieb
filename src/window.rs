@@ -67,6 +67,7 @@ use crate::layout::Layout;
 use nucleo::pattern::CaseMatching;
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use crate::render::{self, Theme, View};
+use crate::secret::Secret;
 use crate::text::Text;
 
 pub struct Options {
@@ -89,6 +90,9 @@ pub enum Input {
     /// Script mode: run a script for each menu, starting with the first.
     /// More than one makes them modes with buttons to switch between.
     Script(Vec<Mode>),
+    /// Password mode: no list, the typing shown as dots, and `message` in
+    /// the message box. Enter hands back the secret, never as text.
+    Secret { message: Option<String> },
 }
 
 /// Where a left press landed. A click needs press and release on the same.
@@ -112,6 +116,8 @@ pub enum Outcome {
     Accept(String),
     /// Exit 0 without printing: a script finished its action.
     Quit,
+    /// Password mode's Enter. Wiped when dropped.
+    Secret(Secret),
     Failed(String),
 }
 
@@ -168,6 +174,9 @@ impl Pending {
     }
 }
 
+/// What password mode shows for each typed character.
+const DOT: &str = "\u{2022}";
+
 /// Id of the very first call, which builds the first menu.
 const FIRST_CALL: u32 = 1;
 
@@ -220,11 +229,13 @@ pub fn wake() -> io::Result<Wake> {
     })
 }
 
-pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dyn Error>> {
+pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dyn Error>> {
     // Input starts streaming before anything else, so it arrives while
     // fonts load and the window maps.
     let (events, event_channel) = channel::channel();
     let mut script = None;
+    let mut secret = None;
+    let mut menu = Menu::default();
     let mut print = Print::Text;
     let matcher = match input {
         Input::Stdin {
@@ -262,6 +273,15 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
             state.start(Call::initial())?;
             script = Some(state);
             // Shown until the first menu arrives.
+            Matcher::new(options.case, wake.notify.clone())
+        }
+        Input::Secret { message } => {
+            // Whatever the theme says: there is nothing to list or count.
+            options.layout.lines = 0;
+            options.theme.counter = false;
+            menu.message = message;
+            secret = Some(Secret::new());
+            // Stays empty, so rows and clicks on them have nothing to hit.
             Matcher::new(options.case, wake.notify.clone())
         }
     };
@@ -335,7 +355,8 @@ pub fn run(options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dy
 
         picker: Picker::new(options.layout.lines),
         script,
-        menu: Menu::default(),
+        secret,
+        menu,
         print,
         wheel: Wheel::default(),
         hovered: None,
@@ -408,6 +429,8 @@ struct App {
     matcher: Matcher,
     picker: Picker,
     script: Option<ScriptState>,
+    /// Password mode's typing, in place of the query.
+    secret: Option<Secret>,
     /// Options of the script menu on screen.
     menu: Menu,
     /// dmenu mode: what a pick prints.
@@ -464,6 +487,10 @@ impl App {
     }
 
     fn key(&mut self, event: KeyEvent) {
+        if self.secret.is_some() {
+            self.secret_key(event);
+            return;
+        }
         let ctrl = self.modifiers.ctrl;
         let count = self.matcher.matched();
         // Letters compare both cases, since Caps Lock uppercases the keysym.
@@ -515,6 +542,45 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Password mode's keys: typing, deleting, Enter and the ways out.
+    /// Nothing moves, since there is nothing to move through.
+    fn secret_key(&mut self, event: KeyEvent) {
+        let ctrl = self.modifiers.ctrl;
+        let alt = self.modifiers.alt;
+        let Some(secret) = &mut self.secret else {
+            return;
+        };
+        let is = |lower: Keysym, upper: Keysym| {
+            ctrl && (event.keysym == lower || event.keysym == upper)
+        };
+        let changed = match event.keysym {
+            Keysym::Escape => {
+                self.outcome = Some(Outcome::Cancel);
+                return;
+            }
+            _ if is(Keysym::c, Keysym::C) || is(Keysym::g, Keysym::G) => {
+                self.outcome = Some(Outcome::Cancel);
+                return;
+            }
+            Keysym::Return | Keysym::KP_Enter => {
+                self.outcome = self.secret.take().map(Outcome::Secret);
+                return;
+            }
+            // Words mean nothing in text you cannot see, so the word
+            // deletions clear it all, like Ctrl+U.
+            Keysym::BackSpace if ctrl => secret.clear(),
+            _ if is(Keysym::w, Keysym::W) || is(Keysym::u, Keysym::U) => secret.clear(),
+            Keysym::BackSpace => secret.backspace(),
+            // `utf8` is sctk's own String, which we cannot wipe. See
+            // `secret` for what that leaves.
+            _ if !ctrl && !alt => event.utf8.as_deref().is_some_and(|text| secret.insert(text)),
+            _ => false,
+        };
+        if changed {
+            self.redraw();
         }
     }
 
@@ -752,6 +818,9 @@ impl App {
         let scroll = self.picker.scroll();
         let selected = (matched > 0).then(|| (self.picker.selected() - scroll) as usize);
         let rows = self.matcher.window(scroll, self.picker.lines());
+        // Password mode draws a dot per character and never the secret, so
+        // it stays out of shaping, glyph caches and the buffer alike.
+        let dots = self.secret.as_ref().map(|secret| DOT.repeat(secret.len()));
         let view = View {
             // As in rofi, a mode's name is its prompt unless it sets one.
             prompt: self
@@ -761,7 +830,7 @@ impl App {
                 .or(self.options.prompt.as_deref())
                 .or(self.script.as_ref().map(|s| s.modes[s.active].label.as_str())),
             message: self.menu.message.as_deref(),
-            query: self.picker.query(),
+            query: dots.as_deref().unwrap_or(self.picker.query()),
             rows: rows
                 .into_iter()
                 .map(|(entry, indices)| render::RowView {

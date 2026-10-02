@@ -125,6 +125,7 @@ fn pick(case: CaseMatching, cli: Cli, format: Format, print: Print) -> ExitCode 
         }
         Ok(window::Outcome::Cancel) => ExitCode::FAILURE,
         Ok(window::Outcome::Quit) => ExitCode::SUCCESS,
+        Ok(window::Outcome::Secret(_)) => unreachable!("only password mode asks for a secret"),
         Ok(window::Outcome::Failed(err)) => fail(err),
         Err(err) => fail(err),
     }
