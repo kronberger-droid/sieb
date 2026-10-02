@@ -82,11 +82,11 @@ impl Layout {
 
     /// Top of the message box, when there is one.
     pub fn message_top(&self) -> f32 {
-        let below_input = self.input_top() + self.input_height() + self.spacing;
+        // Where the separator starts is also just below the input.
         if self.separator > 0.0 {
-            below_input + self.separator + self.spacing
+            self.separator_top() + self.separator + self.spacing
         } else {
-            below_input
+            self.separator_top()
         }
     }
 

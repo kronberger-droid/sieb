@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use crate::layout::Layout;
 use crate::markup::Style;
-use crate::text::{Canvas, Clip, Span, Text};
+use crate::text::{Canvas, Clip, Span, Text, mul};
 
 /// Display cap per row. `Wrap::None` still shapes the whole line, so one
 /// minified JSON blob on stdin would otherwise stall every frame.
@@ -55,39 +55,10 @@ pub struct Palette {
 }
 
 impl Default for Palette {
+    /// The built-in colors, with every fallback applied the same way a
+    /// config file's are.
     fn default() -> Self {
-        let text = [0xcd, 0xd6, 0xf4, 0xff];
-        let dim = [0x7f, 0x84, 0x9c, 0xff];
-        let accent = [0xf5, 0xc2, 0xe7, 0xff];
-        let surface = [0x31, 0x32, 0x44, 0xff];
-        Self {
-            background: [0x1e, 0x1e, 0x2e, 0xf2],
-            border: [0x58, 0x5b, 0x70, 0xff],
-            selected: surface,
-            selected_text: text,
-            separator: surface,
-            text,
-            dim,
-            accent,
-            matched: accent,
-            selected_match: accent,
-            row: TRANSPARENT,
-            placeholder: dim,
-            prompt: accent,
-            prompt_background: TRANSPARENT,
-            badge: [0x1e, 0x1e, 0x2e, 0xff],
-            badge_background: accent,
-            message: dim,
-            message_background: TRANSPARENT,
-            scrollbar: surface,
-            scrollbar_handle: dim,
-            button: surface,
-            button_text: text,
-            button_selected: accent,
-            button_selected_text: [0x1e, 0x1e, 0x2e, 0xff],
-            // A light dim, so it reads as modal without hiding what is behind.
-            backdrop: [0x00, 0x00, 0x00, 0x40],
-        }
+        crate::config::Colors::default().palette()
     }
 }
 
@@ -201,6 +172,13 @@ pub fn panel(
         Some(w) => right - input_padding - w - gap,
         None => right - input_padding,
     };
+    // When the query is wider than the room left, it scrolls so its end,
+    // where typing happens, stays in view, and the caret with it.
+    let caret_width = s(CARET_WIDTH);
+    let room = query_right - query_left - caret_width - s(1.0);
+    let query_width = text.width(size, view.query);
+    let shift = (query_width - room).max(0.0);
+    let caret_x = (query_left - shift + query_width + s(1.0)).min(query_right - caret_width);
 
     let input_top = s(layout.input_top());
     let input_height = s(layout.input_height());
@@ -239,6 +217,11 @@ pub fn panel(
             if let Some(pill) = pill {
                 fill(pill.left, input_top, pill.width, input_height, row_radius, background);
             }
+        }
+        if caret_x >= query_left {
+            let caret_height = line * 0.9;
+            let caret_top = input_top + (input_height - caret_height) / 2.0;
+            fill(caret_x, caret_top, caret_width, caret_height, 0.0, c.accent);
         }
         if layout.separator > 0.0 {
             let top = s(layout.separator_top());
@@ -319,12 +302,7 @@ pub fn panel(
         text.draw(&mut canvas, x, y, size, clip(x, right), spans);
     }
 
-    // The query gets its own clip. When it is wider than the room left, it
-    // scrolls so its end, where typing happens, stays in view.
-    let caret_width = s(CARET_WIDTH);
-    let room = query_right - query_left - caret_width - s(1.0);
-    let query_width = text.width(size, view.query);
-    let shift = (query_width - room).max(0.0);
+    // The query gets its own clip, shifted as worked out above.
     let query_clip = clip(query_left, query_right);
     if view.query.is_empty() && !theme.placeholder.is_empty() {
         let x = query_left + caret_width + s(1.0);
@@ -333,12 +311,6 @@ pub fn panel(
     } else {
         let query = [plain(view.query, c.text)];
         text.draw(&mut canvas, query_left - shift, y, size, query_clip, query);
-    }
-    let caret_x = (query_left - shift + query_width + s(1.0)).min(query_right - caret_width);
-    if caret_x >= query_left {
-        let caret_height = line * 0.9;
-        let caret_top = input_top + (input_height - caret_height) / 2.0;
-        fill(&mut canvas, c.accent, caret_x, caret_top, caret_width, caret_height);
     }
 
     if let Some(message) = view.message {
@@ -383,8 +355,6 @@ pub fn panel(
             text.draw(&mut canvas, centered, y, size, clip(x, x + w), [plain(label, rgba)]);
         }
     }
-
-    to_argb8888(canvas.data);
 }
 
 /// The scrollbar handle's top and length as fractions of the track, for
@@ -443,50 +413,23 @@ fn plain(text: &str, rgba: [u8; 4]) -> Span<'_> {
     (text, text_color(rgba), Style::default())
 }
 
-/// `a * b / 255`, rounded.
-fn mul(a: u8, b: u8) -> u8 {
-    ((a as u32 * b as u32 + 127) / 255) as u8
-}
-
-/// Replaces a rectangle of the RGBA canvas with `color`.
-fn fill(canvas: &mut Canvas, color: [u8; 4], x: f32, y: f32, w: f32, h: f32) {
-    let px = premultiply(color);
-    for py in y.round() as u32..(y + h).round() as u32 {
-        for pxx in x.round() as u32..(x + w).round() as u32 {
-            if pxx < canvas.width && py < canvas.height {
-                let i = ((py * canvas.width + pxx) * 4) as usize;
-                canvas.data[i..i + 4].copy_from_slice(&px);
-            }
-        }
-    }
-}
-
 /// Fills the 1x1 backdrop buffer that the viewporter stretches over the
 /// output: premultiplied, and in `wl_shm` byte order.
-pub fn backdrop(canvas: &mut [u8], color: [u8; 4]) {
-    canvas.copy_from_slice(&premultiply(color));
-    to_argb8888(canvas);
+pub fn backdrop(canvas: &mut [u8], [r, g, b, a]: [u8; 4]) {
+    canvas.copy_from_slice(&[mul(b, a), mul(g, a), mul(r, a), a]);
 }
 
-fn premultiply([r, g, b, a]: [u8; 4]) -> [u8; 4] {
-    let m = |c: u8| ((c as u32 * a as u32 + 127) / 255) as u8;
-    [m(r), m(g), m(b), a]
-}
+// `wl_shm::Format::Argb8888` is BGRA in memory on little endian, while
+// tiny-skia and the glyph blitter think in RGBA. Handing them colors with
+// red and blue swapped makes them write BGRA directly, so no pass over the
+// finished buffer is needed.
 
 fn color([r, g, b, a]: [u8; 4]) -> Color {
-    Color::from_rgba8(r, g, b, a)
+    Color::from_rgba8(b, g, r, a)
 }
 
 fn text_color([r, g, b, a]: [u8; 4]) -> TextColor {
-    TextColor::rgba(r, g, b, a)
-}
-
-/// tiny-skia writes premultiplied RGBA, while `wl_shm::Format::Argb8888` is
-/// BGRA in memory on little endian.
-fn to_argb8888(canvas: &mut [u8]) {
-    for px in canvas.as_chunks_mut::<4>().0 {
-        px.swap(0, 2);
-    }
+    TextColor::rgba(b, g, r, a)
 }
 
 fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Path {

@@ -14,7 +14,8 @@ use fontconfig::{Fontconfig, ObjectSet, Pattern, UnicodeCoverage, list_fonts};
 
 use crate::markup;
 
-/// A borrowed premultiplied RGBA canvas in physical pixels.
+/// A borrowed premultiplied canvas in physical pixels, in `wl_shm` BGRA
+/// byte order. Colors handed to `draw` are in that order too.
 pub struct Canvas<'a> {
     pub data: &'a mut [u8],
     pub width: u32,
@@ -261,7 +262,8 @@ fn blit(
                 }
                 SwashContent::Color => {
                     let px = &image.data[src * 4..src * 4 + 4];
-                    (px[0], px[1], px[2], px[3])
+                    // Color glyphs come as RGBA; the canvas is BGRA.
+                    (px[2], px[1], px[0], px[3])
                 }
                 // Only produced when subpixel rendering is requested.
                 SwashContent::SubpixelMask => continue,
@@ -281,7 +283,7 @@ fn blit(
 }
 
 /// `a * b / 255`, rounded.
-fn mul(a: u8, b: u8) -> u8 {
+pub(crate) fn mul(a: u8, b: u8) -> u8 {
     let t = a as u32 * b as u32 + 128;
     ((t + (t >> 8)) >> 8) as u8
 }

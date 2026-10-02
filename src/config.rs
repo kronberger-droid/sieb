@@ -10,7 +10,7 @@ use clap::Args;
 use serde::Deserialize;
 
 use crate::layout::Layout;
-use crate::render::{Palette, Theme};
+use crate::render::{Palette, TRANSPARENT, Theme};
 
 /// A color as `#rgb`, `#rrggbb` or `#rrggbbaa`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,6 +210,53 @@ pub struct Colors {
     pub backdrop: Option<Rgba>,
 }
 
+impl Colors {
+    /// The palette these colors make: the built-in defaults for the root
+    /// colors, and every other color following the one it falls back to.
+    /// The only place either is defined.
+    pub fn palette(&self) -> Palette {
+        let pick = |color: Option<Rgba>, default: [u8; 4]| color.map_or(default, |c| c.0);
+        let background = pick(self.background, [0x1e, 0x1e, 0x2e, 0xf2]);
+        let text = pick(self.text, [0xcd, 0xd6, 0xf4, 0xff]);
+        let dim = pick(self.dim, [0x7f, 0x84, 0x9c, 0xff]);
+        let accent = pick(self.accent, [0xf5, 0xc2, 0xe7, 0xff]);
+        let separator = pick(self.separator, [0x31, 0x32, 0x44, 0xff]);
+        let matched = pick(self.matched, accent);
+        let scrollbar = pick(self.scrollbar, separator);
+        // Text on an accent pill defaults to the panel color, opaque.
+        let [r, g, b, _] = background;
+        let on_accent = [r, g, b, 0xff];
+        Palette {
+            background,
+            border: pick(self.border, [0x58, 0x5b, 0x70, 0xff]),
+            selected: pick(self.selected, [0x31, 0x32, 0x44, 0xff]),
+            selected_text: pick(self.selected_text, text),
+            separator,
+            text,
+            dim,
+            accent,
+            matched,
+            selected_match: pick(self.selected_match, matched),
+            row: pick(self.row, TRANSPARENT),
+            placeholder: pick(self.placeholder, dim),
+            prompt: pick(self.prompt, accent),
+            prompt_background: pick(self.prompt_background, TRANSPARENT),
+            badge: pick(self.badge, on_accent),
+            badge_background: pick(self.badge_background, accent),
+            message: pick(self.message, dim),
+            message_background: pick(self.message_background, TRANSPARENT),
+            scrollbar,
+            scrollbar_handle: pick(self.scrollbar_handle, dim),
+            button: pick(self.button, scrollbar),
+            button_text: pick(self.button_text, text),
+            button_selected: pick(self.button_selected, accent),
+            button_selected_text: pick(self.button_selected_text, on_accent),
+            // A light dim, so it reads as modal without hiding what is behind.
+            backdrop: pick(self.backdrop, [0x00, 0x00, 0x00, 0x40]),
+        }
+    }
+}
+
 /// Fills every field `self` leaves unset from `fallback`.
 macro_rules! merge {
     ($self:ident, $fallback:ident, $($field:ident),*) => {
@@ -332,49 +379,9 @@ impl Appearance {
             buttons: 0,
         };
 
-        let d = Palette::default();
-        let c = self.colors;
-        let pick = |color: Option<Rgba>, default: [u8; 4]| color.map_or(default, |c| c.0);
-        let background = pick(c.background, d.background);
-        let text = pick(c.text, d.text);
-        let dim = pick(c.dim, d.dim);
-        let accent = pick(c.accent, d.accent);
-        let separator = pick(c.separator, d.separator);
-        let matched = pick(c.matched, accent);
-        let scrollbar = pick(c.scrollbar, separator);
-        // The badge is text on an accent pill, so it defaults to the panel
-        // color, opaque.
-        let [r, g, b, _] = background;
-        let colors = Palette {
-            background,
-            border: pick(c.border, d.border),
-            selected: pick(c.selected, d.selected),
-            selected_text: pick(c.selected_text, text),
-            separator,
-            text,
-            dim,
-            accent,
-            matched,
-            selected_match: pick(c.selected_match, matched),
-            row: pick(c.row, d.row),
-            placeholder: pick(c.placeholder, dim),
-            prompt: pick(c.prompt, accent),
-            prompt_background: pick(c.prompt_background, d.prompt_background),
-            badge: pick(c.badge, [r, g, b, 0xff]),
-            badge_background: pick(c.badge_background, accent),
-            message: pick(c.message, dim),
-            message_background: pick(c.message_background, d.message_background),
-            scrollbar,
-            scrollbar_handle: pick(c.scrollbar_handle, dim),
-            button: pick(c.button, scrollbar),
-            button_text: pick(c.button_text, text),
-            button_selected: pick(c.button_selected, accent),
-            button_selected_text: pick(c.button_selected_text, [r, g, b, 0xff]),
-            backdrop: pick(c.backdrop, d.backdrop),
-        };
         let d = Theme::default();
         let theme = Theme {
-            colors,
+            colors: self.colors.palette(),
             radius: self.radius.unwrap_or(d.radius),
             border_width: self.border_width.unwrap_or(d.border_width),
             row_radius: self.row_radius.unwrap_or(d.row_radius),

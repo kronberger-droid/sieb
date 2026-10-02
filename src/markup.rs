@@ -7,6 +7,8 @@
 
 use std::ops::Range;
 
+use crate::config::Rgba;
+
 /// How a stretch of text is drawn. Unset fields keep the row's own look.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Style {
@@ -159,7 +161,15 @@ fn apply(style: &mut Style, outer: Style, key: &str, value: &str) {
                 style.scale = scale;
             }
         }
-        "foreground" | "fgcolor" | "color" => style.color = color(value),
+        // The same forms a config color takes; `#rrggbbaa` carries an alpha.
+        "foreground" | "fgcolor" | "color" => {
+            if let Ok(Rgba([r, g, b, a])) = value.parse() {
+                style.color = Some([r, g, b]);
+                if a != 0xff {
+                    style.alpha = Some(a);
+                }
+            }
+        }
         "alpha" | "fgalpha" => style.alpha = alpha(value),
         _ => {}
     }
@@ -198,19 +208,6 @@ fn scale(value: &str, outer: f32) -> Option<f32> {
         "larger" => outer / SMALLER,
         percent => percent.strip_suffix('%')?.parse::<f32>().ok()? / 100.0,
     })
-}
-
-fn color(value: &str) -> Option<[u8; 3]> {
-    let hex = value.strip_prefix('#')?;
-    let byte = |i: usize, len: usize| {
-        let v = u8::from_str_radix(hex.get(i..i + len)?, 16).ok()?;
-        Some(if len == 1 { v * 0x11 } else { v })
-    };
-    match hex.len() {
-        3 => Some([byte(0, 1)?, byte(1, 1)?, byte(2, 1)?]),
-        6 => Some([byte(0, 2)?, byte(2, 2)?, byte(4, 2)?]),
-        _ => None,
-    }
 }
 
 /// `50%`, or Pango's 1 to 65535.
