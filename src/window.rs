@@ -112,8 +112,8 @@ enum Event {
 /// How the window was closed.
 pub enum Outcome {
     Cancel,
-    /// Print this and exit 0.
-    Accept(String),
+    /// Print this and exit with this code: 0 for Enter, 10 for Ctrl+Enter.
+    Accept(String, u8),
     /// Exit 0 without printing: a script finished its action.
     Quit,
     /// Password mode's Enter. Wiped when dropped.
@@ -173,6 +173,9 @@ impl Pending {
         self.retv == Retv::Initial && self.id > FIRST_CALL
     }
 }
+
+/// dmenu mode's exit code for Ctrl+Enter, as rofi exits for `kb-custom-1`.
+const ALTERNATE_EXIT: u8 = 10;
 
 /// What password mode shows for each typed character.
 const DOT: &str = "\u{2022}";
@@ -516,7 +519,7 @@ impl App {
                 let count = self.matcher.matched();
                 self.picker.clamp(count);
                 let accept = self.picker.accept(count, self.modifiers.shift);
-                self.accept(accept);
+                self.accept(accept, ctrl);
             }
             // rofi's mode keys. Before the plain Tab arms, which move.
             Keysym::Tab if ctrl && self.modifiers.shift => self.cycle_mode(-1),
@@ -597,10 +600,13 @@ impl App {
     }
 
     /// Enter or a click: print and exit in dmenu mode, call the script in
-    /// script mode.
-    fn accept(&mut self, accept: Accept) {
+    /// script mode. `alternate` is Ctrl+Enter, which tells the script, or
+    /// the caller through exit code 10, that the pick wants its other
+    /// action.
+    fn accept(&mut self, accept: Accept, alternate: bool) {
         let Some(script) = &mut self.script else {
-            self.outcome = Some(Outcome::Accept(self.output(accept)));
+            let code = if alternate { ALTERNATE_EXIT } else { 0 };
+            self.outcome = Some(Outcome::Accept(self.output(accept), code));
             return;
         };
         // One call at a time: a second Enter while the script works is
@@ -619,6 +625,7 @@ impl App {
             Accept::Query if self.menu.no_custom => return,
             Accept::Query => (Retv::Custom, query, None),
         };
+        let retv = if alternate { Retv::Alternate } else { retv };
         let call = Call {
             retv,
             arg: Some(arg.to_owned()),
@@ -1253,7 +1260,7 @@ impl PointerHandler for App {
                         // it comes from the snapshot that was drawn.
                         Some(Press::Row(row)) => {
                             if let Some(rank) = self.rank_at(row) {
-                                self.accept(Accept::Match(rank));
+                                self.accept(Accept::Match(rank), false);
                             }
                         }
                         None => {}

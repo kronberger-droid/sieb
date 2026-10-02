@@ -54,6 +54,9 @@ pub enum Retv {
     Initial = 0,
     Entry = 1,
     Custom = 2,
+    /// Ctrl+Enter, on a row or typed text alike. rofi's `kb-custom-1`,
+    /// so scripts written for rofi read it the same way.
+    Alternate = 10,
 }
 
 /// Owned, since a call can wait for its activation token while the menu it

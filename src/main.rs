@@ -118,10 +118,10 @@ fn pick(case: CaseMatching, cli: Cli, format: Format, print: Print) -> ExitCode 
         theme,
     };
     match window::run(options, input, wake) {
-        Ok(window::Outcome::Accept(line)) => {
+        Ok(window::Outcome::Accept(line, code)) => {
             let mut out = io::stdout().lock();
             let _ = writeln!(out, "{line}");
-            ExitCode::SUCCESS
+            ExitCode::from(code)
         }
         Ok(window::Outcome::Cancel) => ExitCode::FAILURE,
         Ok(window::Outcome::Quit) => ExitCode::SUCCESS,

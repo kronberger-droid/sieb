@@ -8,8 +8,10 @@ ls | get name | to text | sieb --prompt open
 
 Enter prints the highlighted row. When nothing matches, Enter prints the
 query as typed, and Shift+Enter always does. sieb exits 0 on a pick and 1
-on cancel, like dmenu. `--index` prints the row's position in the input
-instead, and `-1` for typed text.
+on cancel, like dmenu. Ctrl+Enter picks the same way but exits 10, rofi's
+code for its first custom key, so a caller can offer a second action.
+`--index` prints the row's position in the input instead, and `-1` for
+typed text.
 
 Matching is fuzzy and smart case: an uppercase letter in the query makes
 the match case-sensitive. `-i` turns that off.
@@ -50,6 +52,7 @@ included. Typed text prints as `{"text": ...}`, or under `FIELD` with
 |---|---|
 | Enter | pick the highlighted row |
 | Shift+Enter | pick the typed text |
+| Ctrl+Enter | pick, exiting 10 (`ROFI_RETV=10` for scripts) |
 | Esc, Ctrl+C, Ctrl+G | cancel |
 | Up, Down, Tab, Shift+Tab | move |
 | Ctrl+P, Ctrl+K / Ctrl+N, Ctrl+J | move up / down |

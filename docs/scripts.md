@@ -9,7 +9,8 @@ scripts run unchanged:
 3. A call that prints nothing ends sieb.
 
 The script sees why it was called in `ROFI_RETV` (0 initial, 1 a row, 2
-typed text), the picked row's `info` in `ROFI_INFO`, and the menu's `data`
+typed text, 10 either picked with Ctrl+Enter, as rofi's first custom key),
+the picked row's `info` in `ROFI_INFO`, and the menu's `data`
 in `ROFI_DATA`. Each also exists as `SIEB_*`, and `SIEB_QUERY` holds the
 query.
 
