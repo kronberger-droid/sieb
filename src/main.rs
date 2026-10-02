@@ -1,14 +1,3 @@
-mod config;
-mod format;
-mod layout;
-mod markup;
-mod matcher;
-mod picker;
-mod render;
-mod script;
-mod text;
-mod window;
-
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -18,8 +7,9 @@ use std::time::Duration;
 use clap::Parser;
 use nucleo::pattern::CaseMatching;
 
-use format::Format;
-use matcher::{Matcher, Print};
+use sieb::format::Format;
+use sieb::matcher::{self, Matcher, Print};
+use sieb::{config, script, window};
 
 /// dmenu-first Wayland picker.
 ///
