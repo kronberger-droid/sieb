@@ -7,9 +7,11 @@
 # that prompt would open while sieb holds the keyboard. With sieb-pinentry
 # as rbw's pinentry, the unlock is a sieb panel of its own.
 #
-# Pick an entry, then what to do with it: type it into the window sieb
-# was opened over, or copy it. Typing waits a moment for focus to return,
-# and copies clear themselves. Needs rbw, wtype and wl-clipboard.
+# Enter on an entry types its username, Tab and password into the window
+# sieb was opened over. Ctrl+Enter (ROFI_RETV 10) asks what else to do:
+# type or copy one field, or copy the TOTP. Typing waits a moment for
+# focus to return, and copies clear themselves. Needs rbw, wtype and
+# wl-clipboard.
 #
 # The secrets never pass through this script. Each action is a small sh
 # program that asks rbw itself and pipes the answer straight into wtype or
@@ -66,6 +68,7 @@ def entries-menu [] {
         row "locked" nonselectable "true"
         return
     }
+    menu-option message "Enter: type login    Ctrl+Enter: more"
     menu-option markup-rows "true"
     for it in (entries | sort-by folder name) {
         let folder = if ($it.folder | is-empty) { "" } else { $"($it.folder | escape)/" }
@@ -129,9 +132,11 @@ def act [action: string, id: string] {
 def main [choice?: string] {
     let info = $env.ROFI_INFO? | default ""
     let data = $env.ROFI_DATA? | default ""
+    let more = ($env.ROFI_RETV? | default "") == "10"
     match [$choice $data] {
         [null, _] => { entries-menu }
-        [_, ""] if ($info | is-not-empty) => { actions-menu $info }
+        [_, ""] if ($info | is-not-empty) and $more => { actions-menu $info }
+        [_, ""] if ($info | is-not-empty) => { act autotype $info }
         [_, $id] if ($info in ($ACTIONS | get action)) => { act $info $id }
         _ => {}
     }
