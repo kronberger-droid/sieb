@@ -223,7 +223,7 @@ pub fn panel(
             let caret_top = input_top + (input_height - caret_height) / 2.0;
             fill(caret_x, caret_top, caret_width, caret_height, 0.0, c.accent);
         }
-        if layout.separator > 0.0 {
+        if layout.separator > 0.0 && layout.has_below() {
             let top = s(layout.separator_top());
             fill(left, top, right - left, s(layout.separator).max(1.0), 0.0, c.separator);
         }
@@ -244,7 +244,7 @@ pub fn panel(
                 fill(s(x), top, s(w), row_height, row_radius, background);
             }
         }
-        if theme.scrollbar {
+        if theme.scrollbar && layout.lines > 0 {
             let x = right - scrollbar_width;
             let radius = scrollbar_width / 2.0;
             fill(x, list_top, scrollbar_width, list_height, radius, c.scrollbar);

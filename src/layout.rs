@@ -25,6 +25,8 @@ pub struct Layout {
     pub row_spacing: f32,
     /// Around the text of the message.
     pub message_padding: f32,
+    /// Rows in the list. 0 means no list at all, as for a password prompt;
+    /// config rejects it, so only callers that want that get it.
     pub lines: u32,
     /// A script set a message, shown in a box of its own above the list.
     pub message: bool,
@@ -61,10 +63,6 @@ impl Layout {
     /// get clipped.
     pub fn row(&self) -> f32 {
         self.line() + 2.0 * self.row_padding
-    }
-
-    fn lines(&self) -> u32 {
-        self.lines.max(1)
     }
 
     pub fn input_top(&self) -> f32 {
@@ -104,8 +102,28 @@ impl Layout {
     }
 
     pub fn list_height(&self) -> f32 {
-        let n = self.lines() as f32;
+        if self.lines == 0 {
+            return 0.0;
+        }
+        let n = self.lines as f32;
         n * self.row() + (n - 1.0) * self.row_spacing
+    }
+
+    /// Whether anything sits below the input row, which is what the
+    /// separator separates it from.
+    pub fn has_below(&self) -> bool {
+        self.lines > 0 || self.message
+    }
+
+    /// Bottom of the last of input, message and list that is there.
+    fn content_bottom(&self) -> f32 {
+        if self.lines > 0 {
+            self.list_top() + self.list_height()
+        } else if self.message {
+            self.message_top() + self.message_height()
+        } else {
+            self.input_top() + self.input_height()
+        }
     }
 
     /// Top of visible row `i`.
@@ -119,7 +137,7 @@ impl Layout {
 
     /// Top of the mode buttons, which are as tall as a row.
     pub fn buttons_top(&self) -> f32 {
-        self.list_top() + self.list_height() + self.spacing
+        self.content_bottom() + self.spacing
     }
 
     /// Left edge and width of mode button `i`. The buttons share the
@@ -149,7 +167,7 @@ impl Layout {
         } else {
             0.0
         };
-        self.list_top() + self.list_height() + buttons + self.padding
+        self.content_bottom() + buttons + self.padding
     }
 
     /// Panel size, rounded up to whole logical pixels.
@@ -167,7 +185,7 @@ impl Layout {
         let pitch = self.row() + self.row_spacing;
         let row = (offset / pitch) as usize;
         let inside = offset - row as f32 * pitch < self.row();
-        (inside && row < self.lines() as usize).then_some(row)
+        (inside && row < self.lines as usize).then_some(row)
     }
 }
 
@@ -265,6 +283,29 @@ mod tests {
         };
         assert_eq!(one.height(), layout().height());
         assert_eq!(one.button_at(20.0, one.buttons_top() as f64 + 1.0), None);
+    }
+
+    #[test]
+    fn no_list_ends_after_the_message() {
+        let layout = Layout {
+            lines: 0,
+            message: true,
+            ..layout()
+        };
+        let bottom = layout.message_top() + layout.message_height();
+        assert_eq!(layout.height(), bottom + layout.padding);
+        assert_eq!(layout.row_at(layout.list_top() as f64 + 1.0), None);
+    }
+
+    #[test]
+    fn no_list_and_no_message_is_just_the_input() {
+        let layout = Layout {
+            lines: 0,
+            ..layout()
+        };
+        let bottom = layout.input_top() + layout.input_height();
+        assert_eq!(layout.height(), bottom + layout.padding);
+        assert!(!layout.has_below());
     }
 
     #[test]
