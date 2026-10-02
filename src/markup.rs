@@ -75,7 +75,9 @@ fn try_parse(source: &str) -> Option<Markup> {
     };
 
     while !rest.is_empty() {
-        let style = stack.last().map_or_else(Style::default, |(_, style)| *style);
+        let style = stack
+            .last()
+            .map_or_else(Style::default, |(_, style)| *style);
         let next = rest.find(['<', '&']).unwrap_or(rest.len());
         push_text(&mut text, &rest[..next], style);
         rest = &rest[next..];
@@ -257,7 +259,9 @@ mod tests {
         // What rofi's drun-display-format in the launcher theme produces.
         let m = parse("Firefox <span weight='light' size='small'><i>(Web Browser)</i></span>");
         assert_eq!(m.text, "Firefox (Web Browser)");
-        let [(range, style)] = &m.spans[..] else { panic!("{m:?}") };
+        let [(range, style)] = &m.spans[..] else {
+            panic!("{m:?}")
+        };
         assert_eq!(&m.text[range.clone()], "(Web Browser)");
         assert!(style.italic);
         assert_eq!(style.weight, 300);
@@ -266,7 +270,10 @@ mod tests {
 
     #[test]
     fn entities() {
-        assert_eq!(parse("Tom &amp; Jerry &lt;3 &#x41;&#66;").text, "Tom & Jerry <3 AB");
+        assert_eq!(
+            parse("Tom &amp; Jerry &lt;3 &#x41;&#66;").text,
+            "Tom & Jerry <3 AB"
+        );
     }
 
     #[test]
@@ -280,13 +287,27 @@ mod tests {
     fn nesting_restores_the_outer_style() {
         let m = parse("<b>a<i>b</i>c</b>d");
         assert_eq!(m.text, "abcd");
-        let styles: Vec<_> = m.spans.iter().map(|(r, s)| (&m.text[r.clone()], s.weight, s.italic)).collect();
-        assert_eq!(styles, [("a", 700, false), ("b", 700, true), ("c", 700, false)]);
+        let styles: Vec<_> = m
+            .spans
+            .iter()
+            .map(|(r, s)| (&m.text[r.clone()], s.weight, s.italic))
+            .collect();
+        assert_eq!(
+            styles,
+            [("a", 700, false), ("b", 700, true), ("c", 700, false)]
+        );
     }
 
     #[test]
     fn broken_markup_shows_as_is() {
-        for source in ["<b>open", "a < b", "x</i>", "<blink>y</blink>", "&nope;", "<b>a</i>"] {
+        for source in [
+            "<b>open",
+            "a < b",
+            "x</i>",
+            "<blink>y</blink>",
+            "&nope;",
+            "<b>a</i>",
+        ] {
             assert_eq!(parse(source).text, source);
         }
     }

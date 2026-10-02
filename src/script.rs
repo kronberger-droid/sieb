@@ -7,8 +7,8 @@
 
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::process::{Command, ExitStatus, Stdio};
+use std::str::FromStr;
 use std::thread;
 
 use nucleo::Injector;
@@ -40,9 +40,10 @@ impl FromStr for Mode {
         let path = PathBuf::from(path);
         let label = match label {
             Some(label) => label.to_owned(),
-            None => path
-                .file_stem()
-                .map_or_else(|| path.display().to_string(), |stem| stem.to_string_lossy().into_owned()),
+            None => path.file_stem().map_or_else(
+                || path.display().to_string(),
+                |stem| stem.to_string_lossy().into_owned(),
+            ),
         };
         Ok(Self { label, path })
     }
@@ -157,16 +158,25 @@ pub fn spawn(
         let mut rows = 0;
         // A read error ends the menu where it got to; the exit status
         // below still tells the UI how the script fared.
-        let _ = format::feed(BufReader::new(stdout), Format::Rofi, None, |line| match line {
-            Line::Mode(key, value) => send(Event::Mode { call: id, key, value }),
-            Line::Row(row) => {
-                matcher::push(&injector, rows, row);
-                if rows == 0 {
-                    send(Event::FirstRow { call: id });
+        let _ = format::feed(
+            BufReader::new(stdout),
+            Format::Rofi,
+            None,
+            |line| match line {
+                Line::Mode(key, value) => send(Event::Mode {
+                    call: id,
+                    key,
+                    value,
+                }),
+                Line::Row(row) => {
+                    matcher::push(&injector, rows, row);
+                    if rows == 0 {
+                        send(Event::FirstRow { call: id });
+                    }
+                    rows += 1;
                 }
-                rows += 1;
-            }
-        });
+            },
+        );
         // Waiting reaps the child; a failed wait reads as a failed script.
         let status = child.wait().unwrap_or_else(|_| failed_status());
         send(Event::Done {
@@ -223,7 +233,10 @@ mod tests {
         let mode = |s: &str| s.parse::<Mode>().unwrap();
         assert_eq!(mode("examples/launcher/drun.nu").label, "drun");
         let labelled = mode("apps:examples/launcher/drun.nu");
-        assert_eq!((labelled.label.as_str(), labelled.path.to_str()), ("apps", Some("examples/launcher/drun.nu")));
+        assert_eq!(
+            (labelled.label.as_str(), labelled.path.to_str()),
+            ("apps", Some("examples/launcher/drun.nu"))
+        );
         // A colon after a slash belongs to the path.
         assert_eq!(mode("./odd:name.nu").path.to_str(), Some("./odd:name.nu"));
         assert!("apps:".parse::<Mode>().is_err());
@@ -231,9 +244,14 @@ mod tests {
 
     #[test]
     fn rows_options_and_exit() {
-        let (rows, events) = run(r"printf '\0prompt\037Power\n'; echo Shutdown; echo Reboot", Call::initial());
+        let (rows, events) = run(
+            r"printf '\0prompt\037Power\n'; echo Shutdown; echo Reboot",
+            Call::initial(),
+        );
         assert_eq!(rows, ["Shutdown", "Reboot"]);
-        assert!(matches!(&events[0], Event::Mode { call: 7, key, value } if key == "prompt" && value == "Power"));
+        assert!(
+            matches!(&events[0], Event::Mode { call: 7, key, value } if key == "prompt" && value == "Power")
+        );
         assert!(matches!(events[1], Event::FirstRow { call: 7 }));
         assert!(matches!(events[2], Event::Done { call: 7, rows: 2, status } if status.success()));
     }
@@ -272,6 +290,8 @@ mod tests {
     fn silent_failure_reports_status() {
         let (rows, events) = run("exit 3", Call::initial());
         assert!(rows.is_empty());
-        assert!(matches!(events[0], Event::Done { rows: 0, status, .. } if status.code() == Some(3)));
+        assert!(
+            matches!(events[0], Event::Done { rows: 0, status, .. } if status.code() == Some(3))
+        );
     }
 }

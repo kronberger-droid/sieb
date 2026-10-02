@@ -253,7 +253,10 @@ mod tests {
             separator: 0.0,
             ..layout()
         };
-        assert_eq!(with.list_top() - without.list_top(), with.separator + with.spacing);
+        assert_eq!(
+            with.list_top() - without.list_top(),
+            with.separator + with.spacing
+        );
     }
 
     #[test]
@@ -272,7 +275,10 @@ mod tests {
         assert_eq!(layout.button_at(11.0, y), Some(0));
         assert_eq!(layout.button_at(100.0, y), None, "the gap between 0 and 1");
         assert_eq!(layout.button_at(389.0, y), Some(3));
-        assert_eq!(layout.height(), layout.buttons_top() + layout.row() + layout.padding);
+        assert_eq!(
+            layout.height(),
+            layout.buttons_top() + layout.row() + layout.padding
+        );
     }
 
     #[test]

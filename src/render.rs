@@ -209,13 +209,33 @@ pub fn panel(
             }
             paint.set_color(color(rgba));
             let path = rounded_rect(x, y, w, h, r);
-            pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+            pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
         };
 
-        fill(0.0, 0.0, width as f32, height as f32, s(theme.radius), c.background);
+        fill(
+            0.0,
+            0.0,
+            width as f32,
+            height as f32,
+            s(theme.radius),
+            c.background,
+        );
         for (pill, background) in [(&badge, c.badge_background), (&prompt, c.prompt_background)] {
             if let Some(pill) = pill {
-                fill(pill.left, input_top, pill.width, input_height, row_radius, background);
+                fill(
+                    pill.left,
+                    input_top,
+                    pill.width,
+                    input_height,
+                    row_radius,
+                    background,
+                );
             }
         }
         if caret_x >= query_left {
@@ -225,29 +245,65 @@ pub fn panel(
         }
         if layout.separator > 0.0 && layout.has_below() {
             let top = s(layout.separator_top());
-            fill(left, top, right - left, s(layout.separator).max(1.0), 0.0, c.separator);
+            fill(
+                left,
+                top,
+                right - left,
+                s(layout.separator).max(1.0),
+                0.0,
+                c.separator,
+            );
         }
         if view.message.is_some() {
             let background = c.message_background;
-            fill(left, message_top, right - left, message_height, row_radius, background);
+            fill(
+                left,
+                message_top,
+                right - left,
+                message_height,
+                row_radius,
+                background,
+            );
         }
         for i in 0..view.rows.len() {
-            let background = if view.selected == Some(i) { c.selected } else { c.row };
+            let background = if view.selected == Some(i) {
+                c.selected
+            } else {
+                c.row
+            };
             let top = s(layout.row_top(i));
-            fill(left, top, list_right - left, row_height, row_radius, background);
+            fill(
+                left,
+                top,
+                list_right - left,
+                row_height,
+                row_radius,
+                background,
+            );
         }
         if view.buttons.len() > 1 {
             let top = s(layout.buttons_top());
             for i in 0..view.buttons.len() {
                 let (x, w) = layout.button(i);
-                let background = if i == view.active { c.button_selected } else { c.button };
+                let background = if i == view.active {
+                    c.button_selected
+                } else {
+                    c.button
+                };
                 fill(s(x), top, s(w), row_height, row_radius, background);
             }
         }
         if theme.scrollbar && layout.lines > 0 {
             let x = right - scrollbar_width;
             let radius = scrollbar_width / 2.0;
-            fill(x, list_top, scrollbar_width, list_height, radius, c.scrollbar);
+            fill(
+                x,
+                list_top,
+                scrollbar_width,
+                list_height,
+                radius,
+                c.scrollbar,
+            );
             let (top, length) = handle(view.scroll, layout.lines, view.matched);
             let (top, length) = (list_top + top * list_height, length * list_height);
             fill(x, top, scrollbar_width, length, radius, c.scrollbar_handle);
@@ -351,8 +407,19 @@ pub fn panel(
             let (x, w) = layout.button(i);
             let (x, w) = (s(x), s(w));
             let centered = x + (w - text.width(size, label)).max(0.0) / 2.0;
-            let rgba = if i == view.active { c.button_selected_text } else { c.button_text };
-            text.draw(&mut canvas, centered, y, size, clip(x, x + w), [plain(label, rgba)]);
+            let rgba = if i == view.active {
+                c.button_selected_text
+            } else {
+                c.button_text
+            };
+            text.draw(
+                &mut canvas,
+                centered,
+                y,
+                size,
+                clip(x, x + w),
+                [plain(label, rgba)],
+            );
         }
     }
 }
@@ -392,7 +459,10 @@ fn highlight<'a>(
         if n == MAX_GRAPHEMES {
             break;
         }
-        let run = (hits.next_if(|&&i| i as usize == n).is_some(), style_at(offset));
+        let run = (
+            hits.next_if(|&&i| i as usize == n).is_some(),
+            style_at(offset),
+        );
         if let Some(prev) = current
             && prev != run
         {
@@ -443,7 +513,14 @@ fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Path {
     pb.line_to(right - r, y);
     pb.cubic_to(right - r + k, y, right, y + r - k, right, y + r);
     pb.line_to(right, bottom - r);
-    pb.cubic_to(right, bottom - r + k, right - r + k, bottom, right - r, bottom);
+    pb.cubic_to(
+        right,
+        bottom - r + k,
+        right - r + k,
+        bottom,
+        right - r,
+        bottom,
+    );
     pb.line_to(x + r, bottom);
     pb.cubic_to(x + r - k, bottom, x, bottom - r + k, x, bottom - r);
     pb.line_to(x, y + r);
@@ -477,7 +554,13 @@ mod tests {
         // "é" as e + combining accent is one grapheme, three bytes.
         assert_eq!(
             runs("cafe\u{301} au", &[3, 5]),
-            [("caf", false), ("e\u{301}", true), (" ", false), ("a", true), ("u", false)]
+            [
+                ("caf", false),
+                ("e\u{301}", true),
+                (" ", false),
+                ("a", true),
+                ("u", false)
+            ]
         );
     }
 
@@ -488,10 +571,19 @@ mod tests {
             ..Style::default()
         };
         let spans = highlight("ab cd", &[1, 3], &[(3..5, italic)]);
-        let got: Vec<_> = spans.iter().map(|&(t, hit, s)| (t, hit, s.italic)).collect();
+        let got: Vec<_> = spans
+            .iter()
+            .map(|&(t, hit, s)| (t, hit, s.italic))
+            .collect();
         assert_eq!(
             got,
-            [("a", false, false), ("b", true, false), (" ", false, false), ("c", true, true), ("d", false, true)]
+            [
+                ("a", false, false),
+                ("b", true, false),
+                (" ", false, false),
+                ("c", true, true),
+                ("d", false, true)
+            ]
         );
     }
 

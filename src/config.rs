@@ -27,7 +27,13 @@ impl FromStr for Rgba {
         }
         let byte = |i: usize, len: usize| u8::from_str_radix(&hex[i..i + len], 16);
         let rgba = match hex.len() {
-            3 => [0, 1, 2, 3].map(|i| if i < 3 { byte(i, 1).map(|v| v * 0x11) } else { Ok(0xff) }),
+            3 => [0, 1, 2, 3].map(|i| {
+                if i < 3 {
+                    byte(i, 1).map(|v| v * 0x11)
+                } else {
+                    Ok(0xff)
+                }
+            }),
             6 | 8 => [0, 2, 4, 6].map(|i| if i < hex.len() { byte(i, 2) } else { Ok(0xff) }),
             _ => return Err(invalid()),
         };
@@ -41,7 +47,9 @@ impl FromStr for Rgba {
 
 impl<'de> Deserialize<'de> for Rgba {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        String::deserialize(d)?.parse().map_err(serde::de::Error::custom)
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -167,7 +175,11 @@ pub struct Colors {
     #[arg(long = "color-row", id = "color-row", value_name = "COLOR")]
     pub row: Option<Rgba>,
     /// Placeholder text [dim]
-    #[arg(long = "color-placeholder", id = "color-placeholder", value_name = "COLOR")]
+    #[arg(
+        long = "color-placeholder",
+        id = "color-placeholder",
+        value_name = "COLOR"
+    )]
     pub placeholder: Option<Rgba>,
     /// Prompt text [accent]
     #[arg(long = "color-prompt", id = "color-prompt", value_name = "COLOR")]
@@ -390,7 +402,11 @@ impl Appearance {
             counter: self.counter.unwrap_or(d.counter),
             scrollbar: self.scrollbar.unwrap_or(d.scrollbar),
         };
-        Ok((self.font.unwrap_or_else(|| "sans-serif".into()), layout, theme))
+        Ok((
+            self.font.unwrap_or_else(|| "sans-serif".into()),
+            layout,
+            theme,
+        ))
     }
 }
 
@@ -538,8 +554,7 @@ mod tests {
 
     #[test]
     fn example_config_matches_defaults() {
-        let file: Appearance =
-            toml::from_str(include_str!("../examples/config.toml")).unwrap();
+        let file: Appearance = toml::from_str(include_str!("../examples/config.toml")).unwrap();
         let (font, layout, theme) = file.resolve().unwrap();
         let (dfont, dlayout, dtheme) = Appearance::default().resolve().unwrap();
         assert_eq!(font, dfont);

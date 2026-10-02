@@ -282,7 +282,10 @@ mod tests {
     fn failure_reason_follows_the_code() {
         let reason = "no Wayland\ncompositor".to_owned();
         let (out, _) = session("GETPIN\n", vec![Answer::Failed(reason)]);
-        assert!(out.ends_with("ERR 83886081 no Wayland compositor\n"), "{out}");
+        assert!(
+            out.ends_with("ERR 83886081 no Wayland compositor\n"),
+            "{out}"
+        );
     }
 
     #[test]

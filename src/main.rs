@@ -140,8 +140,13 @@ fn filter(
 ) -> ExitCode {
     let mut matcher = Matcher::new(case, Arc::new(|| {}));
     matcher.set_query(query);
-    let reader =
-        matcher::spawn_reader(BufReader::new(io::stdin()), matcher.injector(), format, field, |_, _| {});
+    let reader = matcher::spawn_reader(
+        BufReader::new(io::stdin()),
+        matcher.injector(),
+        format,
+        field,
+        |_, _| {},
+    );
     // The worker going idle only means it caught up with what was injected so
     // far, so wait for EOF before draining it.
     if let Err(err) = reader.join().expect("reader thread panicked") {

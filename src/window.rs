@@ -60,15 +60,15 @@ use smithay_client_toolkit::{
 };
 
 use crate::format::Format;
-use crate::matcher::{self, Matcher, Print};
-use crate::script::{self, Call, Mode, Retv};
-use crate::picker::{Accept, Picker, Wheel};
 use crate::layout::Layout;
-use nucleo::pattern::CaseMatching;
-use smithay_client_toolkit::reexports::calloop::channel::Sender;
+use crate::matcher::{self, Matcher, Print};
+use crate::picker::{Accept, Picker, Wheel};
 use crate::render::{self, Theme, View};
+use crate::script::{self, Call, Mode, Retv};
 use crate::secret::Secret;
 use crate::text::Text;
+use nucleo::pattern::CaseMatching;
+use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
 pub struct Options {
     pub prompt: Option<String>,
@@ -309,16 +309,14 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
     let shm = Shm::bind(&globals, &qh)?;
     let viewporter: WpViewporter = globals.bind(&qh, 1..=1, ())?;
     // Optional: without it we fall back to the integer scale.
-    let fractional_manager: Option<WpFractionalScaleManagerV1> =
-        globals.bind(&qh, 1..=1, ()).ok();
+    let fractional_manager: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
     // Optional too: without it, launched apps open the way they always did.
     let activation = ActivationState::bind(&globals, &qh).ok();
 
     // The backdrop covers the whole output, bars included, and takes the
     // keyboard. Every click outside the panel lands on it.
     let backdrop = compositor.create_surface(&qh);
-    let layer =
-        layer_shell.create_layer_surface(&qh, backdrop, Layer::Overlay, Some("sieb"), None);
+    let layer = layer_shell.create_layer_surface(&qh, backdrop, Layer::Overlay, Some("sieb"), None);
     layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_exclusive_zone(-1);
     layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
@@ -513,9 +511,8 @@ impl App {
         let ctrl = self.modifiers.ctrl;
         let count = self.matcher.matched();
         // Letters compare both cases, since Caps Lock uppercases the keysym.
-        let is = |lower: Keysym, upper: Keysym| {
-            ctrl && (event.keysym == lower || event.keysym == upper)
-        };
+        let is =
+            |lower: Keysym, upper: Keysym| ctrl && (event.keysym == lower || event.keysym == upper);
 
         match event.keysym {
             Keysym::Escape => self.outcome = Some(Outcome::Cancel),
@@ -572,9 +569,8 @@ impl App {
         let Some(secret) = &mut self.secret else {
             return;
         };
-        let is = |lower: Keysym, upper: Keysym| {
-            ctrl && (event.keysym == lower || event.keysym == upper)
-        };
+        let is =
+            |lower: Keysym, upper: Keysym| ctrl && (event.keysym == lower || event.keysym == upper);
         let changed = match event.keysym {
             Keysym::Escape => {
                 self.outcome = Some(Outcome::Cancel);
@@ -595,7 +591,10 @@ impl App {
             Keysym::BackSpace => secret.backspace(),
             // `utf8` is sctk's own String, which we cannot wipe. See
             // `secret` for what that leaves.
-            _ if !ctrl && !alt => event.utf8.as_deref().is_some_and(|text| secret.insert(text)),
+            _ if !ctrl && !alt => event
+                .utf8
+                .as_deref()
+                .is_some_and(|text| secret.insert(text)),
             _ => false,
         };
         if changed {
@@ -627,9 +626,11 @@ impl App {
         let query = self.picker.query();
         let (retv, arg, info) = match accept {
             Accept::Match(rank) => match self.matcher.get(rank) {
-                Some(entry) if entry.row.selectable => {
-                    (Retv::Entry, entry.row.text.as_str(), entry.row.info().map(str::to_owned))
-                }
+                Some(entry) if entry.row.selectable => (
+                    Retv::Entry,
+                    entry.row.text.as_str(),
+                    entry.row.info().map(str::to_owned),
+                ),
                 _ => return,
             },
             Accept::Query if self.menu.no_custom => return,
@@ -867,7 +868,10 @@ impl App {
                 .prompt
                 .as_deref()
                 .or(self.options.prompt.as_deref())
-                .or(self.script.as_ref().map(|s| s.modes[s.active].label.as_str())),
+                .or(self
+                    .script
+                    .as_ref()
+                    .map(|s| s.modes[s.active].label.as_str())),
             message: self.menu.message.as_deref(),
             query: dots.as_deref().unwrap_or(self.picker.query()),
             rows: rows
@@ -1119,14 +1123,16 @@ impl SeatHandler for App {
                 )
                 .ok();
         }
-        if capability == Capability::Pointer && self.pointer.is_none()
-            && let Ok(pointer) = self.seats.get_pointer(qh, &seat) {
-                self.shape_device = self
-                    .cursor_shapes
-                    .as_ref()
-                    .map(|m| m.get_shape_device(&pointer, qh));
-                self.pointer = Some(pointer);
-            }
+        if capability == Capability::Pointer
+            && self.pointer.is_none()
+            && let Ok(pointer) = self.seats.get_pointer(qh, &seat)
+        {
+            self.shape_device = self
+                .cursor_shapes
+                .as_ref()
+                .map(|m| m.get_shape_device(&pointer, qh));
+            self.pointer = Some(pointer);
+        }
     }
 
     fn remove_capability(
@@ -1137,9 +1143,10 @@ impl SeatHandler for App {
         capability: Capability,
     ) {
         if capability == Capability::Keyboard
-            && let Some(keyboard) = self.keyboard.take() {
-                keyboard.release();
-            }
+            && let Some(keyboard) = self.keyboard.take()
+        {
+            keyboard.release();
+        }
         if capability == Capability::Pointer {
             if let Some(device) = self.shape_device.take() {
                 device.destroy();
@@ -1273,13 +1280,19 @@ impl PointerHandler for App {
                     }
                 }
                 PointerEventKind::Leave { .. } => self.hovered = None,
-                PointerEventKind::Press { button: BTN_LEFT, serial, .. } => {
+                PointerEventKind::Press {
+                    button: BTN_LEFT,
+                    serial,
+                    ..
+                } => {
                     self.serial = serial;
                     self.press = self.press_at(event.position);
                 }
                 // Single click accepts. Wayland has no double click, and
                 // inventing a threshold would ignore the user's settings.
-                PointerEventKind::Release { button: BTN_LEFT, .. } => {
+                PointerEventKind::Release {
+                    button: BTN_LEFT, ..
+                } => {
                     let press = self.press.take();
                     match self.press_at(event.position) {
                         released if released != press => {}
@@ -1321,8 +1334,7 @@ impl OutputHandler for App {
 
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-    }
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
 
 impl ShmHandler for App {

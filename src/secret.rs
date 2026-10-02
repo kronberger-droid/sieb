@@ -29,7 +29,8 @@ impl Secret {
         let mut buf = Vec::<u8>::with_capacity(CAPACITY);
         // SAFETY: the range is the buffer's own allocation, which lives
         // until `drop` unlocks it.
-        let locked = unsafe { rustix::mm::mlock(buf.as_mut_ptr().cast::<c_void>(), CAPACITY) }.is_ok();
+        let locked =
+            unsafe { rustix::mm::mlock(buf.as_mut_ptr().cast::<c_void>(), CAPACITY) }.is_ok();
         Self { buf, locked }
     }
 
@@ -111,7 +112,8 @@ impl Drop for Secret {
         self.buf.zeroize();
         if self.locked {
             // SAFETY: the same range `new` locked, still allocated.
-            let _ = unsafe { rustix::mm::munlock(self.buf.as_mut_ptr().cast::<c_void>(), CAPACITY) };
+            let _ =
+                unsafe { rustix::mm::munlock(self.buf.as_mut_ptr().cast::<c_void>(), CAPACITY) };
         }
     }
 }

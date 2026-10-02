@@ -232,7 +232,11 @@ fn from_value(value: Value, field: Option<&str>) -> Vec<Line> {
     // Only an object made of nothing but option keys sets options. Any other
     // object is a row, or `ls | to json` would vanish into ignored options.
     let shown = field.unwrap_or("text");
-    if !object.contains_key(shown) && object.keys().all(|key| MENU_OPTIONS.contains(&key.as_str())) {
+    if !object.contains_key(shown)
+        && object
+            .keys()
+            .all(|key| MENU_OPTIONS.contains(&key.as_str()))
+    {
         object.remove("sieb");
         return object
             .into_iter()
@@ -287,7 +291,9 @@ mod tests {
         let line = parse_rofi(
             "Shutdown\0info\x1fpoweroff\x1fmeta\x1fhalt off\x1fnonselectable\x1ftrue\x1ficon\x1fsystem",
         );
-        let Line::Row(r) = line else { panic!("{line:?}") };
+        let Line::Row(r) = line else {
+            panic!("{line:?}")
+        };
         assert_eq!(
             (r.text.as_str(), r.info(), r.meta(), r.selectable, r.raw()),
             ("Shutdown", Some("poweroff"), Some("halt off"), false, None)
@@ -333,12 +339,16 @@ not json
         let lines = all(input, Format::Json);
         assert_eq!(lines[0], Line::Mode("prompt".into(), "files".into()));
         assert_eq!(lines[1], Line::Mode("no-custom".into(), "true".into()));
-        let Line::Row(object) = &lines[2] else { panic!() };
+        let Line::Row(object) = &lines[2] else {
+            panic!()
+        };
         assert_eq!((object.text.as_str(), object.info()), ("a.rs", Some("3")));
         // Unknown fields ride along for the output.
         assert!(object.raw().unwrap().contains(r#""size":10"#));
         // A bare string prints back as the same JSON string.
-        assert!(matches!(&lines[3], Line::Row(r) if r.text == "plain" && r.raw() == Some("\"plain\"")));
+        assert!(
+            matches!(&lines[3], Line::Row(r) if r.text == "plain" && r.raw() == Some("\"plain\""))
+        );
         assert_eq!(lines[4], row("not json"));
         assert_eq!(lines.len(), 5);
     }
@@ -351,14 +361,20 @@ not json
             if r.text == r#"{"name":"a.rs","type":"file","size":10}"#
             && r.raw() == Some(r.text.as_str())));
         // An unknown key next to option keys makes it a row too.
-        assert!(matches!(&all(r#"{"prompt":"p","name":"x"}"#, Format::Json)[..], [Line::Row(_)]));
+        assert!(matches!(
+            &all(r#"{"prompt":"p","name":"x"}"#, Format::Json)[..],
+            [Line::Row(_)]
+        ));
     }
 
     #[test]
     fn named_field_is_shown() {
         let input = r#"[{"name":"a.rs","size":10},{"text":"t","name":"b.rs"},{"size":3}]"#;
         let mut lines = Vec::new();
-        feed(input.as_bytes(), Format::Json, Some("name"), |line| lines.push(line)).unwrap();
+        feed(input.as_bytes(), Format::Json, Some("name"), |line| {
+            lines.push(line)
+        })
+        .unwrap();
         let texts: Vec<_> = lines
             .iter()
             .map(|line| match line {
@@ -375,17 +391,26 @@ not json
 
     #[test]
     fn json_array_from_nu() {
-        let lines = all(r#"  [{"text":"a","selectable":false},{"text":"b"}]"#, Format::Json);
+        let lines = all(
+            r#"  [{"text":"a","selectable":false},{"text":"b"}]"#,
+            Format::Json,
+        );
         assert!(matches!(&lines[0], Line::Row(r) if r.text == "a" && !r.selectable));
         assert!(matches!(&lines[1], Line::Row(r) if r.text == "b" && r.selectable));
     }
 
     #[test]
     fn script_switches_to_json_with_a_header() {
-        let lines = all("{\"sieb\": 1, \"prompt\": \"p\"}\n{\"text\": \"a\"}\n", Format::Rofi);
+        let lines = all(
+            "{\"sieb\": 1, \"prompt\": \"p\"}\n{\"text\": \"a\"}\n",
+            Format::Rofi,
+        );
         assert_eq!(lines[0], Line::Mode("prompt".into(), "p".into()));
         assert!(matches!(&lines[1], Line::Row(r) if r.text == "a"));
         // Without the header, a brace is just text.
-        assert_eq!(all("{\"text\": \"a\"}\n", Format::Rofi), [row("{\"text\": \"a\"}")]);
+        assert_eq!(
+            all("{\"text\": \"a\"}\n", Format::Rofi),
+            [row("{\"text\": \"a\"}")]
+        );
     }
 }

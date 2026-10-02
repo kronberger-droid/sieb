@@ -35,7 +35,9 @@ pub enum Print {
     Index,
     /// The JSON value the row came from. Typed text comes back as an
     /// object with the text under `field`, `text` by default.
-    Json { field: Option<String> },
+    Json {
+        field: Option<String>,
+    },
 }
 
 impl Print {
@@ -198,10 +200,16 @@ mod tests {
     fn filter(input: &'static [u8], query: &str) -> Vec<(u32, String)> {
         let mut matcher = Matcher::new(CaseMatching::Smart, Arc::new(|| {}));
         matcher.set_query(query);
-        spawn_reader(Cursor::new(input), matcher.injector(), Format::Plain, None, |_, _| {})
-            .join()
-            .unwrap()
-            .unwrap();
+        spawn_reader(
+            Cursor::new(input),
+            matcher.injector(),
+            Format::Plain,
+            None,
+            |_, _| {},
+        )
+        .join()
+        .unwrap()
+        .unwrap();
         while matcher.tick(10).running {}
         matcher
             .matches()

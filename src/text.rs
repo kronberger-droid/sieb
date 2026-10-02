@@ -119,7 +119,10 @@ impl Text {
     /// Width of `text` in physical pixels.
     pub fn width(&mut self, size: f32, text: &str) -> f32 {
         let buffer = self.shape(size, [(text, Color(0), markup::Style::default())]);
-        buffer.layout_runs().map(|run| run.line_w).fold(0.0, f32::max)
+        buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0, f32::max)
     }
 
     /// Height of one line box at `size`, for vertical centering.
@@ -306,7 +309,11 @@ mod tests {
         let start = std::time::Instant::now();
         let mut text = Text::load("sans-serif").unwrap();
         let faces = text.fonts.db().faces().count();
-        eprintln!("loaded {:?} ({faces} faces) in {:?}", text.family, start.elapsed());
+        eprintln!(
+            "loaded {:?} ({faces} faces) in {:?}",
+            text.family,
+            start.elapsed()
+        );
 
         // Fallback has to reach fonts that are registered but never parsed.
         let start = std::time::Instant::now();
