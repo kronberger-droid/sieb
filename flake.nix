@@ -78,6 +78,38 @@
         '';
     });
 
+    # `nix flake check` is the whole gate, locally and in CI: the package
+    # build runs the tests, plus clippy, rustfmt and a parse of the example
+    # scripts.
+    checks = forAllSystems (system: let
+      pkgs = pkgsFor system;
+      sieb = self.packages.${system}.default;
+    in {
+      build = sieb;
+      # Reuses the package's vendored dependencies, so clippy runs offline in
+      # the sandbox like the build does.
+      clippy = sieb.overrideAttrs (old: {
+        pname = "sieb-clippy";
+        nativeBuildInputs = old.nativeBuildInputs ++ [pkgs.clippy];
+        buildPhase = "cargo clippy --all-targets --offline -- -D warnings";
+        doCheck = false;
+        installPhase = "touch $out";
+        postInstall = "";
+      });
+      fmt = pkgs.runCommand "sieb-fmt" {nativeBuildInputs = [pkgs.cargo pkgs.rustfmt];} ''
+        cd ${self} && cargo fmt --all --check && touch $out
+      '';
+      # Parsed with nixpkgs' release nushell, the one most users bring.
+      examples = pkgs.runCommand "sieb-examples-parse" {nativeBuildInputs = [pkgs.nushell];} ''
+        export HOME=$TMPDIR
+        for f in $(find ${self}/examples -name '*.nu'); do
+          nu --no-config-file -c "if not (nu-check '$f') { exit 1 }" \
+            || { echo "nu-check: $f does not parse" >&2; exit 1; }
+        done
+        touch $out
+      '';
+    });
+
     devShells = forAllSystems (system: let
       pkgs = pkgsFor system;
     in {

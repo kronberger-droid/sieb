@@ -1,0 +1,16 @@
+# One gate, the same one as locally: `nix flake check` builds sieb with its
+# tests, runs clippy and rustfmt, and parses the example scripts.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - run: nix flake check -L
