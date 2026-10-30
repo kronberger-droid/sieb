@@ -32,6 +32,9 @@ pub struct Layout {
     pub message: bool,
     /// Mode buttons under the list, one per script; none for fewer than 2.
     pub buttons: usize,
+    /// Room under the list, left over when the message box took rows from
+    /// it: see [`Layout::message_over_list`].
+    pub slack: f32,
 }
 
 impl Default for Layout {
@@ -49,6 +52,7 @@ impl Default for Layout {
             lines: 10,
             message: false,
             buttons: 0,
+            slack: 0.0,
         }
     }
 }
@@ -118,11 +122,36 @@ impl Layout {
     /// Bottom of the last of input, message and list that is there.
     fn content_bottom(&self) -> f32 {
         if self.lines > 0 {
-            self.list_top() + self.list_height()
+            self.list_top() + self.list_height() + self.slack
         } else if self.message {
             self.message_top() + self.message_height()
         } else {
             self.input_top() + self.input_height()
+        }
+    }
+
+    /// This layout with the message box shown, in room the list gives up
+    /// rather than below the panel's edge: the list loses as many rows as
+    /// the box needs, and the panel keeps its height. For a box that comes
+    /// and goes while typing, so the panel does not jump with it. With no
+    /// list to take from, or a single row, the panel grows instead.
+    pub fn message_over_list(self) -> Self {
+        if self.message || self.lines < 2 {
+            return Self {
+                message: true,
+                ..self
+            };
+        }
+        let needed = self.message_height() + self.spacing;
+        let taken = (needed / (self.row() + self.row_spacing)).ceil() as u32;
+        let shown = Self {
+            message: true,
+            lines: self.lines - taken.min(self.lines - 1),
+            ..self
+        };
+        Self {
+            slack: (self.height() - shown.height()).max(0.0),
+            ..shown
         }
     }
 
@@ -244,6 +273,41 @@ mod tests {
         assert_eq!(layout.height(), height + shift);
         // The message box is not a list row.
         assert_eq!(layout.row_at(layout.message_top() as f64 + 1.0), None);
+    }
+
+    #[test]
+    fn message_over_list_keeps_the_height() {
+        for layout in [
+            layout(),
+            Layout {
+                row_spacing: 5.0,
+                message_padding: 8.0,
+                spacing: 10.0,
+                buttons: 2,
+                ..layout()
+            },
+        ] {
+            let over = layout.message_over_list();
+            assert!(over.message);
+            // Whole rows, as many as the box and its gap need.
+            let pitch = layout.row() + layout.row_spacing;
+            let taken = layout.lines - over.lines;
+            assert!(taken as f32 * pitch >= layout.message_height() + layout.spacing);
+            assert!((taken - 1) as f32 * pitch < layout.message_height() + layout.spacing);
+            assert_eq!(over.height(), layout.height());
+            assert_eq!(over.buttons_top(), layout.buttons_top(), "buttons stay put");
+        }
+    }
+
+    #[test]
+    fn message_over_a_short_list_grows_the_panel() {
+        let one = Layout {
+            lines: 1,
+            ..layout()
+        };
+        let over = one.message_over_list();
+        assert_eq!(over.lines, 1);
+        assert!(over.height() > one.height());
     }
 
     #[test]

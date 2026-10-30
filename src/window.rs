@@ -1001,10 +1001,17 @@ impl App {
     /// The layout of the frame on screen. Drawing and hit-testing both use
     /// it, so a click always lands where the last frame put things.
     fn layout(&self) -> Layout {
-        Layout {
-            message: message(&self.menu, &self.completions).0.is_some(),
+        let layout = Layout {
+            message: self.menu.message.is_some(),
             buttons: self.script.as_ref().map_or(0, |s| s.modes.len()),
             ..self.options.layout
+        };
+        // Completions come and go while typing; in a box of their own they
+        // take list rows, so the panel does not jump with every keystroke.
+        if self.completions.items.is_empty() {
+            layout
+        } else {
+            layout.message_over_list()
         }
     }
 
@@ -1041,6 +1048,7 @@ impl App {
         let bh = (ph as f64 * self.scale).round() as i32;
 
         let (matched, total) = self.matcher.counts();
+        self.picker.fit(layout.lines, matched);
         let scroll = self.picker.scroll();
         let selected = (matched > 0).then(|| (self.picker.selected() - scroll) as usize);
         let (message, message_mark) = message(&self.menu, &self.completions);

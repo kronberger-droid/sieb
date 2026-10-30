@@ -117,6 +117,13 @@ impl Picker {
         self.follow();
     }
 
+    /// The list now shows `lines` rows, as when a message box takes some
+    /// of its room: scrolls so the selection stays visible.
+    pub fn fit(&mut self, lines: u32, count: u32) {
+        self.lines = lines.max(1);
+        self.clamp(count);
+    }
+
     /// Scrolls just enough to keep the selection visible.
     fn follow(&mut self) {
         if self.selected < self.scroll {
@@ -243,6 +250,18 @@ mod tests {
         assert_eq!((picker.selected(), picker.scroll()), (3, 0));
         picker.clamp(0);
         assert_eq!((picker.selected(), picker.scroll()), (0, 0));
+    }
+
+    #[test]
+    fn fit_keeps_the_selection_visible() {
+        let mut picker = Picker::new(5);
+        picker.move_by(4, 20);
+        picker.fit(3, 20);
+        assert_eq!((picker.selected(), picker.scroll()), (4, 2));
+        // Back to 5 rows: no scrolling past the end.
+        picker.move_by(100, 20);
+        picker.fit(5, 20);
+        assert_eq!((picker.selected(), picker.scroll()), (19, 15));
     }
 
     #[test]

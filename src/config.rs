@@ -389,6 +389,7 @@ impl Appearance {
             lines: self.lines.unwrap_or(d.lines),
             message: false,
             buttons: 0,
+            slack: 0.0,
         };
 
         let d = Theme::default();
