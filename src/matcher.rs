@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use nucleo::pattern::{CaseMatching, Normalization};
+use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Injector, Nucleo, Status};
 
 use crate::format::{self, Format, Line, Row};
@@ -70,7 +70,13 @@ impl Print {
 pub struct Matcher {
     nucleo: Nucleo<Entry>,
     case: CaseMatching,
+    /// The query nucleo ranks by: the typed one, or empty with `filter`
+    /// off.
     query: String,
+    /// With `filter` off, rows keep input order whatever is typed, and
+    /// `hint`, parsed from the typed query, only marks where they match.
+    filter: bool,
+    hint: Option<Pattern>,
     /// Separate from the worker's matchers: recomputes match positions for
     /// the handful of visible rows on the UI thread.
     highlighter: nucleo::Matcher,
@@ -84,6 +90,8 @@ impl Matcher {
             nucleo: Nucleo::new(Config::DEFAULT, notify, None, 1),
             case,
             query: String::new(),
+            filter: true,
+            hint: None,
             highlighter: nucleo::Matcher::new(Config::DEFAULT),
         }
     }
@@ -93,13 +101,26 @@ impl Matcher {
     }
 
     pub fn set_query(&mut self, query: &str) {
-        // nucleo only rescores the previous matches when told the new query
-        // extends the old one. Getting this wrong loses matches.
-        let append = query.starts_with(self.query.as_str());
-        self.nucleo
-            .pattern
-            .reparse(0, query, self.case, Normalization::Smart, append);
-        self.query = query.to_owned();
+        let ranked = if self.filter { query } else { "" };
+        // nucleo restarts its pass over every row on any reparse, even to
+        // the same pattern, which unfiltered would be every keystroke.
+        if ranked != self.query {
+            // nucleo only rescores the previous matches when told the new
+            // query extends the old one. Getting this wrong loses matches.
+            let append = ranked.starts_with(self.query.as_str());
+            self.nucleo
+                .pattern
+                .reparse(0, ranked, self.case, Normalization::Smart, append);
+            self.query = ranked.to_owned();
+        }
+        self.hint = (!self.filter && !query.is_empty())
+            .then(|| Pattern::parse(query, self.case, Normalization::Smart));
+    }
+
+    /// Whether the query filters and ranks rows; takes effect at the next
+    /// [`Matcher::set_query`].
+    pub fn set_filter(&mut self, filter: bool) {
+        self.filter = filter;
     }
 
     /// Waits up to `timeout_ms` for the workers and refreshes the snapshot.
@@ -134,12 +155,16 @@ impl Matcher {
     }
 
     /// Up to `len` matches starting at `start`, each with the sorted
-    /// grapheme indices that matched the query.
+    /// grapheme indices that matched the query. With filtering off, a row
+    /// the query does not match has none.
     pub fn window(&mut self, start: u32, len: u32) -> Vec<(&Entry, Vec<u32>)> {
         let snapshot = self.nucleo.snapshot();
         let end = (start + len).min(snapshot.matched_item_count());
         let start = start.min(end);
-        let pattern = snapshot.pattern().column_pattern(0);
+        let pattern = match &self.hint {
+            Some(hint) => hint,
+            None => snapshot.pattern().column_pattern(0),
+        };
         snapshot
             .matched_items(start..end)
             .map(|item| {
@@ -198,7 +223,16 @@ mod tests {
     use std::io::Cursor;
 
     fn filter(input: &'static [u8], query: &str) -> Vec<(u32, String)> {
+        fed(input, true, query)
+            .matches()
+            .map(|e| (e.index, e.row.text.clone()))
+            .collect()
+    }
+
+    /// A matcher with `input` read in and ranked for `query`.
+    fn fed(input: &'static [u8], filter: bool, query: &str) -> Matcher {
         let mut matcher = Matcher::new(CaseMatching::Smart, Arc::new(|| {}));
+        matcher.set_filter(filter);
         matcher.set_query(query);
         spawn_reader(
             Cursor::new(input),
@@ -212,9 +246,6 @@ mod tests {
         .unwrap();
         while matcher.tick(10).running {}
         matcher
-            .matches()
-            .map(|e| (e.index, e.row.text.clone()))
-            .collect()
     }
 
     #[test]
@@ -252,6 +283,24 @@ mod tests {
     fn strips_crlf() {
         let got = filter(b"one\r\ntwo\r\n", "");
         assert_eq!(got, [(0, "one".into()), (1, "two".into())]);
+    }
+
+    #[test]
+    fn without_filter_rows_stay_and_matches_are_marked() {
+        let mut matcher = fed(b"foo\nbar\nbaz\n", false, "bar");
+        let rows: Vec<_> = matcher
+            .window(0, 10)
+            .into_iter()
+            .map(|(e, marks)| (e.row.text.clone(), marks))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("foo".into(), vec![]),
+                ("bar".into(), vec![0, 1, 2]),
+                ("baz".into(), vec![]),
+            ]
+        );
     }
 
     #[test]

@@ -97,6 +97,8 @@ impl Default for Theme {
 pub struct View<'a> {
     pub prompt: Option<&'a str>,
     pub message: Option<&'a str>,
+    /// A byte range of `message` drawn bold: the completion Tab puts in.
+    pub message_mark: Option<Range<usize>>,
     pub query: &'a str,
     pub rows: Vec<RowView<'a>>,
     /// Index into `rows`.
@@ -373,7 +375,22 @@ pub fn panel(
         let x = left + s(layout.message_padding);
         let y = text_top(message_top, message_height);
         let clip = clip(left, right - s(layout.message_padding));
-        text.draw(&mut canvas, x, y, size, clip, [plain(message, c.message)]);
+        let mark = view
+            .message_mark
+            .clone()
+            .filter(|mark| message.get(mark.clone()).is_some())
+            .unwrap_or(0..0);
+        let bold = Style {
+            weight: 700,
+            ..Style::default()
+        };
+        let color = text_color(c.message);
+        let spans = [
+            (&message[..mark.start], color, Style::default()),
+            (&message[mark.clone()], color, bold),
+            (&message[mark.end..], color, Style::default()),
+        ];
+        text.draw(&mut canvas, x, y, size, clip, spans);
     }
 
     // Match list.
@@ -608,6 +625,7 @@ mod tests {
         let view = View {
             prompt: Some("run"),
             message: None,
+            message_mark: None,
             query: "swr",
             rows,
             selected: Some(2),

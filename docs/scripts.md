@@ -9,7 +9,8 @@ scripts run unchanged:
 3. A call that prints nothing ends sieb.
 
 The script sees why it was called in `ROFI_RETV` (0 initial, 1 a row, 2
-typed text, 10 either picked with Ctrl+Enter, as rofi's first custom key),
+typed text, 10 either picked with Ctrl+Enter, as rofi's first custom key,
+20 a completion request, see `complete` below),
 the picked row's `info` in `ROFI_INFO`, and the menu's `data`
 in `ROFI_DATA`. Each also exists as `SIEB_*`, and `SIEB_QUERY` holds the
 query.
@@ -28,7 +29,20 @@ Shutdown\0info\x1fpoweroff  row with options
 
 Supported row options are `info`, `meta` and `nonselectable`. Supported
 menu options are `prompt`, `message`, `data`, `no-custom`, `keep-filter`,
-`new-selection` and `markup-rows`.
+`no-filter`, `complete`, `new-selection` and `markup-rows`.
+
+`no-filter` is sieb's own: typing leaves the rows where they are and only
+highlights the ones that match. Enter with text typed submits the text,
+and with nothing typed picks the highlighted row, so it suits a list the
+next command will act on.
+
+`complete` is sieb's own too: once typing pauses, sieb runs the script
+again with `ROFI_RETV` 20 and the query as the argument (and in
+`SIEB_QUERY`), and shows the rows it prints in the message box. A row's
+text is the label, its `info` the whole query Tab puts in, the text itself
+when it has none. Repeated Tabs cycle through them. These calls run beside
+the menu and never replace its rows; whatever else the script prints is
+ignored.
 
 A script whose first line is `{"sieb": 1}` writes the rest as JSON rows
 instead, in the same shape as [`--json`](dmenu.md#json) input.

@@ -4,10 +4,13 @@
 //! The script runs with no argument for the first menu, then with the
 //! picked entry as its argument. Whatever it prints becomes the next menu;
 //! printing nothing ends the session.
+//!
+//! A menu with the `complete` option is also asked, while the user types,
+//! for completions of the query: see [`complete`].
 
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::thread;
 
@@ -58,6 +61,8 @@ pub enum Retv {
     /// Ctrl+Enter, on a row or typed text alike. rofi's `kb-custom-1`,
     /// so scripts written for rofi read it the same way.
     Alternate = 10,
+    /// sieb's own: completions for the query, see [`complete`].
+    Complete = 20,
 }
 
 /// Owned, since a call can wait for its activation token while the menu it
@@ -105,6 +110,18 @@ pub enum Event {
         status: ExitStatus,
         rows: u32,
     },
+    /// What a [`complete`] call printed, for the query of `generation`.
+    Completions {
+        generation: u32,
+        items: Vec<Completion>,
+    },
+}
+
+/// One completion: what the list shows and the query Tab puts in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Completion {
+    pub label: String,
+    pub query: String,
 }
 
 /// Starts `script` and streams its rows into `injector` on a thread.
@@ -118,41 +135,7 @@ pub fn spawn(
     injector: Injector<Entry>,
     send: impl Fn(Event) + Send + 'static,
 ) -> io::Result<()> {
-    let mut command = Command::new(script);
-    command
-        .args(&call.arg)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    // The names GTK 4 / Qt and GTK 3 read the token from. Without a fresh
-    // one, unset: sieb was likely started with a token of its own, already
-    // spent on mapping sieb, and an app handed that one stays unfocused.
-    for var in ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"] {
-        match &call.token {
-            Some(token) => command.env(var, token),
-            None => command.env_remove(var),
-        };
-    }
-    let retv = (call.retv as u8).to_string();
-    let vars: [(&[&str], Option<&str>); 4] = [
-        (&["SIEB_RETV", "ROFI_RETV"], Some(&retv)),
-        (&["SIEB_INFO", "ROFI_INFO"], call.info.as_deref()),
-        (&["SIEB_DATA", "ROFI_DATA"], call.data.as_deref()),
-        // rofi has no query variable.
-        (&["SIEB_QUERY"], Some(&call.query)),
-    ];
-    for (names, value) in vars {
-        for name in names {
-            match value {
-                Some(value) => command.env(name, value),
-                // Unset rather than inherited from a sieb that a script
-                // started, which would leak an unrelated value.
-                None => command.env_remove(name),
-            };
-        }
-    }
-
-    let mut child = command.spawn()?;
+    let mut child = command(script, &call).spawn()?;
     let stdout = child.stdout.take().expect("stdout is piped");
     thread::spawn(move || {
         let mut rows = 0;
@@ -188,6 +171,75 @@ pub fn spawn(
     Ok(())
 }
 
+/// Asks `script` for completions of `call.query`, with `ROFI_RETV` 20.
+///
+/// Each row it prints is one: the text is what the list shows, and `info`
+/// the whole query that Tab puts in, the text itself when there is none.
+/// Menu options are ignored. Completions run beside the menu's own call
+/// and never replace its rows. The caller gets the child to kill and reap,
+/// since a newer query makes its answer worthless.
+pub fn complete(
+    script: &Path,
+    call: Call,
+    generation: u32,
+    send: impl Fn(Event) + Send + 'static,
+) -> io::Result<Child> {
+    let mut child = command(script, &call).spawn()?;
+    let stdout = child.stdout.take().expect("stdout is piped");
+    thread::spawn(move || {
+        let mut items = Vec::new();
+        let _ = format::feed(BufReader::new(stdout), Format::Rofi, None, |line| {
+            if let Line::Row(row) = line {
+                let query = row.info().map_or_else(|| row.text.clone(), str::to_owned);
+                items.push(Completion {
+                    label: row.text,
+                    query,
+                });
+            }
+        });
+        send(Event::Completions { generation, items });
+    });
+    Ok(child)
+}
+
+/// The script's process, with the call's environment set and stdout piped.
+fn command(script: &Path, call: &Call) -> Command {
+    let mut command = Command::new(script);
+    command
+        .args(&call.arg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    // The names GTK 4 / Qt and GTK 3 read the token from. Without a fresh
+    // one, unset: sieb was likely started with a token of its own, already
+    // spent on mapping sieb, and an app handed that one stays unfocused.
+    for var in ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"] {
+        match &call.token {
+            Some(token) => command.env(var, token),
+            None => command.env_remove(var),
+        };
+    }
+    let retv = (call.retv as u8).to_string();
+    let vars: [(&[&str], Option<&str>); 4] = [
+        (&["SIEB_RETV", "ROFI_RETV"], Some(&retv)),
+        (&["SIEB_INFO", "ROFI_INFO"], call.info.as_deref()),
+        (&["SIEB_DATA", "ROFI_DATA"], call.data.as_deref()),
+        // rofi has no query variable.
+        (&["SIEB_QUERY"], Some(&call.query)),
+    ];
+    for (names, value) in vars {
+        for name in names {
+            match value {
+                Some(value) => command.env(name, value),
+                // Unset rather than inherited from a sieb that a script
+                // started, which would leak an unrelated value.
+                None => command.env_remove(name),
+            };
+        }
+    }
+    command
+}
+
 fn failed_status() -> ExitStatus {
     use std::os::unix::process::ExitStatusExt;
     ExitStatus::from_raw(1 << 8)
@@ -202,15 +254,9 @@ mod tests {
     fn run(body: &str, call: Call) -> (Vec<String>, Vec<Event>) {
         use crate::matcher::Matcher;
         use nucleo::pattern::CaseMatching;
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::{Arc, mpsc};
 
-        let dir = std::env::temp_dir().join(format!("sieb-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("script-{:x}", body.len() ^ body.as_ptr() as usize));
-        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-
+        let path = script_file(body);
         let mut matcher = Matcher::new(CaseMatching::Smart, Arc::new(|| {}));
         let (sender, receiver) = mpsc::channel();
         let send = move |event| {
@@ -226,6 +272,19 @@ mod tests {
         let rows = matcher.matches().map(|e| e.row.text.clone()).collect();
         let _ = std::fs::remove_file(path);
         (rows, events)
+    }
+
+    /// `body` as an executable sh script in a temp dir, named after it so
+    /// tests running at once do not overwrite each other's.
+    fn script_file(body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("sieb-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("script-{:x}", body.len() ^ body.as_ptr() as usize));
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
     }
 
     #[test]
@@ -284,6 +343,38 @@ mod tests {
         unsafe { std::env::set_var("XDG_ACTIVATION_TOKEN", "stale") };
         let (rows, _) = run(r#"echo "[${XDG_ACTIVATION_TOKEN-unset}]""#, Call::initial());
         assert_eq!(rows, ["[unset]"]);
+    }
+
+    #[test]
+    fn completions_take_info_as_the_query() {
+        use std::sync::mpsc;
+
+        let path = script_file(
+            r"printf '\0prompt\037ignored\nwhere\0info\037ls | where\n'; echo $ROFI_RETV",
+        );
+        let (sender, receiver) = mpsc::channel();
+        let call = Call {
+            retv: Retv::Complete,
+            arg: Some("ls | wh".into()),
+            query: "ls | wh".into(),
+            ..Call::initial()
+        };
+        let mut child = complete(&path, call, 3, move |event| {
+            let _ = sender.send(event);
+        })
+        .unwrap();
+        let event = receiver.recv().unwrap();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(path);
+        let item = |label: &str, query: &str| Completion {
+            label: label.into(),
+            query: query.into(),
+        };
+        assert!(matches!(
+            event,
+            Event::Completions { generation: 3, items }
+                if items == [item("where", "ls | where"), item("20", "20")]
+        ));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 use std::error::Error;
 use std::io::{self, BufReader};
 use std::path::Path;
+use std::process::Child;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -15,8 +16,9 @@ use smithay_client_toolkit::{
     output::{OutputHandler, OutputState},
     reexports::{
         calloop::{
-            EventLoop, LoopHandle, channel,
+            EventLoop, LoopHandle, RegistrationToken, channel,
             ping::{PingSource, make_ping},
+            timer::{TimeoutAction, Timer},
         },
         calloop_wayland_source::WaylandSource,
         client::{
@@ -59,7 +61,7 @@ use smithay_client_toolkit::{
     subcompositor::SubcompositorState,
 };
 
-use crate::format::Format;
+use crate::format::{self, Format};
 use crate::layout::Layout;
 use crate::matcher::{self, Matcher, Print};
 use crate::picker::{Accept, Picker, Wheel};
@@ -134,23 +136,53 @@ struct Menu {
     no_custom: bool,
     /// Keep the query when this menu replaces the previous one.
     keep_filter: bool,
+    /// Typing marks matching rows instead of filtering, and Enter with
+    /// text typed submits the text.
+    no_filter: bool,
+    /// The script completes the query while the user types; Tab puts a
+    /// completion in.
+    complete: bool,
     /// Handed to the next call as `ROFI_DATA`.
     data: Option<String>,
 }
 
 impl Menu {
-    fn set(&mut self, key: &str, value: String) {
+    /// Whether `key` is an option sieb knows here. Only the ones in
+    /// [`format::MENU_OPTIONS`] count, the list that also decides what JSON
+    /// input sets options, so a key missing there fails in both formats
+    /// alike; a test holds every listed key to an arm here.
+    fn set(&mut self, key: &str, value: String) -> bool {
+        if !format::MENU_OPTIONS.contains(&key) {
+            return false;
+        }
         match key {
             "prompt" => self.prompt = Some(value),
             "message" => self.message = Some(value),
             "new-selection" => self.new_selection = value.parse().ok(),
             "no-custom" => self.no_custom = value == "true",
             "keep-filter" => self.keep_filter = value == "true",
+            "no-filter" => self.no_filter = value == "true",
+            "complete" => self.complete = value == "true",
             "data" => self.data = Some(value),
             // markup-rows is applied while reading rows (format::feed).
             // urgent, active, use-hot-keys, keep-selection, delim, theme:
             // not yet.
-            _ => {}
+            _ => return false,
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_takes_every_json_option() {
+        // `sieb` marks JSON output, `markup-rows` applies while reading.
+        for key in crate::format::MENU_OPTIONS {
+            let known = Menu::default().set(key, "true".into());
+            assert!(known || ["sieb", "markup-rows"].contains(key), "{key}");
         }
     }
 }
@@ -187,12 +219,63 @@ const NO_FOCUS: &str = "no keyboard: typing goes elsewhere";
 /// Id of the very first call, which builds the first menu.
 const FIRST_CALL: u32 = 1;
 
+/// The message box's text: completions while there are any, so they show
+/// where the script's own words would be, else the script's. With
+/// completions, also the span of the one Tab puts in next. Fields rather
+/// than the app, so drawing can hold it while the matcher lends out rows.
+fn message<'a>(
+    menu: &'a Menu,
+    completions: &'a Completions,
+) -> (Option<&'a str>, Option<std::ops::Range<usize>>) {
+    if completions.items.is_empty() {
+        (menu.message.as_deref(), None)
+    } else {
+        let next = completions.marks.get(completions.next).cloned();
+        (Some(&completions.labels), next)
+    }
+}
+
+/// How long typing pauses before the script is asked for completions, so a
+/// word typed in one go costs one call.
+const COMPLETE_AFTER: Duration = Duration::from_millis(150);
+
+/// Completions of the query, for a menu with the `complete` option.
+#[derive(Default)]
+struct Completions {
+    /// Bumped by every edit of the query; an answer for an older one is
+    /// dropped.
+    generation: u32,
+    /// The pause timer, while it runs.
+    timer: Option<RegistrationToken>,
+    items: Vec<script::Completion>,
+    /// The labels as the message box shows them, joined once on arrival,
+    /// and where in it each one is, to mark the one Tab puts in next.
+    labels: String,
+    marks: Vec<std::ops::Range<usize>>,
+    /// The one the next Tab puts in. Repeated Tabs cycle, since putting one
+    /// in does not ask again.
+    next: usize,
+    /// The script asked last, killed once its answer is in or no longer
+    /// wanted, so a slow one does not pile up behind fast typing.
+    child: Option<Child>,
+}
+
+impl Completions {
+    fn reap(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// What the script side is doing. One call at a time.
 enum Busy {
     Idle,
     /// A picked call waiting for its activation token before it runs.
     AwaitingToken(Call),
-    Running(Pending),
+    /// Boxed, since a pending menu carries a whole matcher.
+    Running(Box<Pending>),
 }
 
 struct ScriptState {
@@ -383,6 +466,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         modifiers: Modifiers::default(),
         focused: false,
         outcome: None,
+        completions: Completions::default(),
     };
 
     let pending = wake.pending;
@@ -471,6 +555,7 @@ struct App {
     /// keyboard there, so this starts false until the compositor says so.
     focused: bool,
     outcome: Option<Outcome>,
+    completions: Completions,
 }
 
 impl App {
@@ -479,6 +564,77 @@ impl App {
             self.scale = scale;
             self.redraw();
         }
+    }
+
+    /// Forgets the completions of the old query and, for a menu that wants
+    /// them, asks for new ones once typing pauses.
+    fn schedule_completions(&mut self) {
+        let completions = &mut self.completions;
+        completions.generation = completions.generation.wrapping_add(1);
+        completions.items.clear();
+        completions.next = 0;
+        completions.reap();
+        if let Some(timer) = completions.timer.take() {
+            self.loop_handle.remove(timer);
+        }
+        if !self.menu.complete || self.script.is_none() || self.picker.query().is_empty() {
+            return;
+        }
+        // Rescheduling removes this timer, so when it fires its query is
+        // still the current one.
+        completions.timer = self
+            .loop_handle
+            .insert_source(Timer::from_duration(COMPLETE_AFTER), |_, _, app| {
+                app.completions.timer = None;
+                app.ask_completions();
+                TimeoutAction::Drop
+            })
+            .ok();
+    }
+
+    fn ask_completions(&mut self) {
+        let Some(script) = &self.script else {
+            return;
+        };
+        let query = self.picker.query().to_owned();
+        let call = Call {
+            retv: Retv::Complete,
+            arg: Some(query.clone()),
+            query,
+            data: self.menu.data.clone(),
+            ..Call::initial()
+        };
+        let events = script.events.clone();
+        let generation = self.completions.generation;
+        // A script that cannot start already failed its menu call loudly;
+        // completions just stay away.
+        self.completions.child = script::complete(script.path(), call, generation, move |event| {
+            let _ = events.send(Event::Script(event));
+        })
+        .ok();
+    }
+
+    /// Tab with completions up: puts the next one in. The query changes
+    /// without asking again, so the next Tab moves on to the one after.
+    fn next_completion(&mut self) -> bool {
+        let completions = &mut self.completions;
+        let Some(item) = completions.items.get(completions.next) else {
+            return false;
+        };
+        let query = item.query.clone();
+        completions.next = (completions.next + 1) % completions.items.len();
+        self.picker.clear();
+        self.picker.insert(&query);
+        self.apply_query();
+        true
+    }
+
+    /// Hands `no-filter` to the matcher, for a new menu or the option
+    /// arriving after the menu is up, as dmenu's JSON options do.
+    fn apply_filter(&mut self) {
+        self.matcher.set_filter(!self.menu.no_filter);
+        self.matcher.set_query(self.picker.query());
+        self.refresh();
     }
 
     /// Picks up new matcher results.
@@ -491,6 +647,11 @@ impl App {
     }
 
     fn query_changed(&mut self) {
+        self.schedule_completions();
+        self.apply_query();
+    }
+
+    fn apply_query(&mut self) {
         self.matcher.set_query(self.picker.query());
         // Starts the worker on the new pattern; results arrive via notify.
         self.refresh();
@@ -525,7 +686,10 @@ impl App {
                 self.matcher.settle(Duration::from_millis(150));
                 let count = self.matcher.matched();
                 self.picker.clamp(count);
-                let accept = self.picker.accept(count, self.modifiers.shift);
+                // Unfiltered, the list never empties to say the text is
+                // meant as typed, so any text is.
+                let typed = self.menu.no_filter && !self.picker.query().is_empty();
+                let accept = self.picker.accept(count, self.modifiers.shift || typed);
                 self.accept(accept, ctrl);
             }
             // rofi's mode keys. Before the plain Tab arms, which move.
@@ -534,6 +698,7 @@ impl App {
             Keysym::Tab if ctrl => self.cycle_mode(1),
             Keysym::Left | Keysym::KP_Left if self.modifiers.shift => self.cycle_mode(-1),
             Keysym::Right | Keysym::KP_Right if self.modifiers.shift => self.cycle_mode(1),
+            Keysym::Tab if self.next_completion() => {}
             Keysym::Up | Keysym::KP_Up | Keysym::ISO_Left_Tab => self.move_by(-1, count),
             Keysym::Down | Keysym::KP_Down | Keysym::Tab => self.move_by(1, count),
             _ if is(Keysym::p, Keysym::P) || is(Keysym::k, Keysym::K) => self.move_by(-1, count),
@@ -712,8 +877,9 @@ impl App {
             self.picker.clear();
         }
         self.picker.clamp(0);
-        self.matcher.set_query(self.picker.query());
-        self.refresh();
+        self.apply_filter();
+        // Completions belonged to the old menu, and the query may be new.
+        self.schedule_completions();
         if let Some(rank) = self.menu.new_selection {
             // The script printed its rows before exiting, but they may still
             // be in flight: give the matcher a moment so a selection near
@@ -728,6 +894,9 @@ impl App {
         let event = match event {
             Event::Option(key, value) => {
                 self.menu.set(&key, value);
+                if key == "no-filter" {
+                    self.apply_filter();
+                }
                 self.redraw();
                 return;
             }
@@ -739,13 +908,36 @@ impl App {
         match event {
             // Options for the call on its way in, or the one on screen.
             script::Event::Mode { call, key, value } => match &mut script.busy {
-                Busy::Running(pending) if pending.id == call => pending.menu.set(&key, value),
+                Busy::Running(pending) if pending.id == call => {
+                    pending.menu.set(&key, value);
+                }
                 _ if script.visible == Some(call) => {
                     self.menu.set(&key, value);
+                    if key == "no-filter" {
+                        self.apply_filter();
+                    }
                     self.redraw();
                 }
                 _ => {}
             },
+            script::Event::Completions { generation, items } => {
+                let completions = &mut self.completions;
+                if generation == completions.generation {
+                    completions.reap();
+                    completions.labels.clear();
+                    completions.marks.clear();
+                    for item in &items {
+                        if !completions.labels.is_empty() {
+                            completions.labels.push_str("  \u{b7}  ");
+                        }
+                        let start = completions.labels.len();
+                        completions.labels.push_str(&item.label);
+                        completions.marks.push(start..completions.labels.len());
+                    }
+                    completions.items = items;
+                    self.redraw();
+                }
+            }
             script::Event::FirstRow { call } => {
                 if let Some(pending) = script.take_running(call) {
                     self.show(pending);
@@ -810,7 +1002,7 @@ impl App {
     /// it, so a click always lands where the last frame put things.
     fn layout(&self) -> Layout {
         Layout {
-            message: self.menu.message.is_some(),
+            message: message(&self.menu, &self.completions).0.is_some(),
             buttons: self.script.as_ref().map_or(0, |s| s.modes.len()),
             ..self.options.layout
         }
@@ -851,6 +1043,7 @@ impl App {
         let (matched, total) = self.matcher.counts();
         let scroll = self.picker.scroll();
         let selected = (matched > 0).then(|| (self.picker.selected() - scroll) as usize);
+        let (message, message_mark) = message(&self.menu, &self.completions);
         let rows = self.matcher.window(scroll, self.picker.lines());
         // Password mode draws a dot per character and never the secret, so
         // it stays out of shaping, glyph caches and the buffer alike.
@@ -872,7 +1065,8 @@ impl App {
                     .script
                     .as_ref()
                     .map(|s| s.modes[s.active].label.as_str())),
-            message: self.menu.message.as_deref(),
+            message,
+            message_mark,
             query: dots.as_deref().unwrap_or(self.picker.query()),
             rows: rows
                 .into_iter()
@@ -957,19 +1151,19 @@ impl ScriptState {
         };
         script::spawn(self.path(), call, id, matcher.injector(), send)
             .map_err(|err| format!("{}: {err}", self.path().display()))?;
-        self.busy = Busy::Running(Pending {
+        self.busy = Busy::Running(Box::new(Pending {
             id,
             matcher,
             menu: Menu::default(),
             retv,
-        });
+        }));
         Ok(())
     }
 
     /// The running call `id`, which is done waiting.
     fn take_running(&mut self, id: u32) -> Option<Pending> {
         match std::mem::replace(&mut self.busy, Busy::Idle) {
-            Busy::Running(pending) if pending.id == id => Some(pending),
+            Busy::Running(pending) if pending.id == id => Some(*pending),
             other => {
                 self.busy = other;
                 None

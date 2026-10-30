@@ -202,12 +202,14 @@ pub fn parse_rofi(line: &str) -> Line {
 }
 
 /// Keys of an object that sets menu options instead of being a row.
-const MENU_OPTIONS: &[&str] = &[
+pub(crate) const MENU_OPTIONS: &[&str] = &[
     "sieb",
     "prompt",
     "message",
     "no-custom",
     "keep-filter",
+    "no-filter",
+    "complete",
     "data",
     "new-selection",
     "markup-rows",
