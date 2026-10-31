@@ -40,7 +40,8 @@ next command will act on.
 again with `ROFI_RETV` 20 and the query as the argument (and in
 `SIEB_QUERY`), and shows the rows it prints in the message box. A row's
 text is the label, its `info` the whole query Tab puts in, the text itself
-when it has none. Repeated Tabs cycle through them. These calls run beside
+when it has none. Repeated Tabs cycle through them, and Enter keeps the
+one put in and closes the box rather than submitting. These calls run beside
 the menu and never replace its rows; whatever else the script prints is
 ignored.
 

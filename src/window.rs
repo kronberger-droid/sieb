@@ -255,12 +255,24 @@ struct Completions {
     /// The one the next Tab puts in. Repeated Tabs cycle, since putting one
     /// in does not ask again.
     next: usize,
+    /// Tab put one in and nothing was typed since, so Enter accepts it
+    /// rather than submitting the query.
+    cycling: bool,
     /// The script asked last, killed once its answer is in or no longer
     /// wanted, so a slow one does not pile up behind fast typing.
     child: Option<Child>,
 }
 
 impl Completions {
+    /// Drops the shown ones and any answer still on its way.
+    fn forget(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.items.clear();
+        self.next = 0;
+        self.cycling = false;
+        self.reap();
+    }
+
     fn reap(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -570,10 +582,7 @@ impl App {
     /// them, asks for new ones once typing pauses.
     fn schedule_completions(&mut self) {
         let completions = &mut self.completions;
-        completions.generation = completions.generation.wrapping_add(1);
-        completions.items.clear();
-        completions.next = 0;
-        completions.reap();
+        completions.forget();
         if let Some(timer) = completions.timer.take() {
             self.loop_handle.remove(timer);
         }
@@ -623,9 +632,22 @@ impl App {
         };
         let query = item.query.clone();
         completions.next = (completions.next + 1) % completions.items.len();
+        completions.cycling = true;
         self.picker.clear();
         self.picker.insert(&query);
         self.apply_query();
+        true
+    }
+
+    /// Enter while Tab cycles: keeps the completion that is in and closes
+    /// the box, as a shell's completion menu does. The next Enter submits.
+    /// Nothing asks again until the query is edited.
+    fn accept_completion(&mut self) -> bool {
+        if !self.completions.cycling {
+            return false;
+        }
+        self.completions.forget();
+        self.redraw();
         true
     }
 
@@ -680,6 +702,8 @@ impl App {
             _ if is(Keysym::c, Keysym::C) || is(Keysym::g, Keysym::G) => {
                 self.outcome = Some(Outcome::Cancel)
             }
+            Keysym::Return | Keysym::KP_Enter
+                if !ctrl && !self.modifiers.shift && self.accept_completion() => {}
             Keysym::Return | Keysym::KP_Enter => {
                 // Right after typing, the snapshot may still rank the previous
                 // query, and Enter would pick from the wrong list.
