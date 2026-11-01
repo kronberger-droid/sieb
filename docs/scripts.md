@@ -10,7 +10,8 @@ scripts run unchanged:
 
 The script sees why it was called in `ROFI_RETV` (0 initial, 1 a row, 2
 typed text, 10 either picked with Ctrl+Enter, as rofi's first custom key,
-20 a completion request, see `complete` below),
+11 to 19 picked with the menu's `custom-keys`, 20 a completion request,
+see `complete` below),
 the picked row's `info` in `ROFI_INFO`, and the menu's `data`
 in `ROFI_DATA`. Each also exists as `SIEB_*`, and `SIEB_QUERY` holds the
 query.
@@ -29,7 +30,17 @@ Shutdown\0info\x1fpoweroff  row with options
 
 Supported row options are `info`, `meta` and `nonselectable`. Supported
 menu options are `prompt`, `message`, `data`, `no-custom`, `keep-filter`,
-`no-filter`, `complete`, `new-selection` and `markup-rows`.
+`no-filter`, `complete`, `new-selection`, `markup-rows` and
+`custom-keys`.
+
+`custom-keys` is sieb's own: up to nine keys, separated by commas, that
+pick the selection like Enter but send `ROFI_RETV` 11, 12 and on, in the
+order given, as rofi's `kb-custom-2` and up would. A key is `Control`,
+`Alt`, `Shift` or `Super` joined with `+` to a single character or to
+`Return`, `Space` or `Tab`: `Alt+u,Alt+Shift+p`. Letters need the Shift
+they are written with. One key that does not parse leaves the whole list
+unbound, so a typo cannot move the others onto the wrong number. The keys
+apply to the menu that sets them, and win over sieb's own.
 
 `no-filter` is sieb's own: typing leaves the rows where they are and only
 highlights the ones that match. Enter with text typed submits the text,

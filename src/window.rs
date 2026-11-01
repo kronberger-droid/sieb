@@ -62,6 +62,7 @@ use smithay_client_toolkit::{
 };
 
 use crate::format::{self, Format};
+use crate::keys::{self, Binding};
 use crate::layout::Layout;
 use crate::matcher::{self, Matcher, Print};
 use crate::picker::{Accept, Picker, Wheel};
@@ -144,6 +145,8 @@ struct Menu {
     complete: bool,
     /// Handed to the next call as `ROFI_DATA`.
     data: Option<String>,
+    /// sieb's own: the keys that send `kb-custom-2` and up.
+    custom_keys: Vec<Binding>,
 }
 
 impl Menu {
@@ -164,6 +167,7 @@ impl Menu {
             "no-filter" => self.no_filter = value == "true",
             "complete" => self.complete = value == "true",
             "data" => self.data = Some(value),
+            "custom-keys" => self.custom_keys = keys::parse_list(&value),
             // markup-rows is applied while reading rows (format::feed).
             // urgent, active, use-hot-keys, keep-selection, delim, theme:
             // not yet.
@@ -205,9 +209,6 @@ impl Pending {
         self.retv == Retv::Initial && self.id > FIRST_CALL
     }
 }
-
-/// dmenu mode's exit code for Ctrl+Enter, as rofi exits for `kb-custom-1`.
-const ALTERNATE_EXIT: u8 = 10;
 
 /// What password mode shows for each typed character.
 const DOT: &str = "\u{2022}";
@@ -697,6 +698,18 @@ impl App {
         let is =
             |lower: Keysym, upper: Keysym| ctrl && (event.keysym == lower || event.keysym == upper);
 
+        // The menu's own keys come first, since the script asked for them
+        // by name. The first is kb-custom-2, Ctrl+Enter being kb-custom-1.
+        if let Some(index) = self
+            .menu
+            .custom_keys
+            .iter()
+            .position(|binding| binding.matches(event.keysym, &self.modifiers))
+        {
+            self.pick(Some(index as u8 + 2), false);
+            return;
+        }
+
         match event.keysym {
             Keysym::Escape => self.outcome = Some(Outcome::Cancel),
             _ if is(Keysym::c, Keysym::C) || is(Keysym::g, Keysym::G) => {
@@ -705,16 +718,7 @@ impl App {
             Keysym::Return | Keysym::KP_Enter
                 if !ctrl && !self.modifiers.shift && self.accept_completion() => {}
             Keysym::Return | Keysym::KP_Enter => {
-                // Right after typing, the snapshot may still rank the previous
-                // query, and Enter would pick from the wrong list.
-                self.matcher.settle(Duration::from_millis(150));
-                let count = self.matcher.matched();
-                self.picker.clamp(count);
-                // Unfiltered, the list never empties to say the text is
-                // meant as typed, so any text is.
-                let typed = self.menu.no_filter && !self.picker.query().is_empty();
-                let accept = self.picker.accept(count, self.modifiers.shift || typed);
-                self.accept(accept, ctrl);
+                self.pick(ctrl.then_some(1), self.modifiers.shift);
             }
             // rofi's mode keys. Before the plain Tab arms, which move.
             Keysym::Tab if ctrl && self.modifiers.shift => self.cycle_mode(-1),
@@ -797,13 +801,28 @@ impl App {
         (rank < self.matcher.matched()).then_some(rank)
     }
 
+    /// Enter or a custom key on the selection. `typed` submits the query
+    /// even when a row matches, as Shift+Enter does.
+    fn pick(&mut self, kb: Option<u8>, typed: bool) {
+        // Right after typing, the snapshot may still rank the previous
+        // query, and Enter would pick from the wrong list.
+        self.matcher.settle(Duration::from_millis(150));
+        let count = self.matcher.matched();
+        self.picker.clamp(count);
+        // Unfiltered, the list never empties to say the text is
+        // meant as typed, so any text is.
+        let typed = typed || (self.menu.no_filter && !self.picker.query().is_empty());
+        let accept = self.picker.accept(count, typed);
+        self.accept(accept, kb);
+    }
+
     /// Enter or a click: print and exit in dmenu mode, call the script in
-    /// script mode. `alternate` is Ctrl+Enter, which tells the script, or
-    /// the caller through exit code 10, that the pick wants its other
-    /// action.
-    fn accept(&mut self, accept: Accept, alternate: bool) {
+    /// script mode. `kb` is rofi's `kb-custom-N`, 1 for Ctrl+Enter, which
+    /// tells the script as `ROFI_RETV` 9+N, or the caller through that exit
+    /// code, which other action the pick wants.
+    fn accept(&mut self, accept: Accept, kb: Option<u8>) {
         let Some(script) = &mut self.script else {
-            let code = if alternate { ALTERNATE_EXIT } else { 0 };
+            let code = kb.map_or(0, |n| 9 + n);
             self.outcome = Some(Outcome::Accept(self.output(accept), code));
             return;
         };
@@ -825,7 +844,7 @@ impl App {
             Accept::Query if self.menu.no_custom => return,
             Accept::Query => (Retv::Custom, query, None),
         };
-        let retv = if alternate { Retv::Alternate } else { retv };
+        let retv = kb.map_or(retv, Retv::Kb);
         let call = Call {
             retv,
             arg: Some(arg.to_owned()),
@@ -1527,7 +1546,7 @@ impl PointerHandler for App {
                         // it comes from the snapshot that was drawn.
                         Some(Press::Row(row)) => {
                             if let Some(rank) = self.rank_at(row) {
-                                self.accept(Accept::Match(rank), false);
+                                self.accept(Accept::Match(rank), None);
                             }
                         }
                         None => {}

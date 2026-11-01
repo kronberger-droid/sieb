@@ -3,6 +3,7 @@
 pub mod assuan;
 pub mod config;
 pub mod format;
+pub mod keys;
 pub mod layout;
 pub mod markup;
 pub mod matcher;

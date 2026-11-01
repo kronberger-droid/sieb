@@ -55,14 +55,27 @@ impl FromStr for Mode {
 /// Why the script is being called, as `ROFI_RETV`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Retv {
-    Initial = 0,
-    Entry = 1,
-    Custom = 2,
-    /// Ctrl+Enter, on a row or typed text alike. rofi's `kb-custom-1`,
-    /// so scripts written for rofi read it the same way.
-    Alternate = 10,
+    Initial,
+    Entry,
+    Custom,
+    /// rofi's `kb-custom-N`, on a row or typed text alike, sent as 9+N so
+    /// scripts written for rofi read it the same way. 1 is Ctrl+Enter, the
+    /// rest the menu's `custom-keys` in order.
+    Kb(u8),
     /// sieb's own: completions for the query, see [`complete`].
-    Complete = 20,
+    Complete,
+}
+
+impl Retv {
+    pub fn code(self) -> u8 {
+        match self {
+            Retv::Initial => 0,
+            Retv::Entry => 1,
+            Retv::Custom => 2,
+            Retv::Kb(n) => 9 + n,
+            Retv::Complete => 20,
+        }
+    }
 }
 
 /// Owned, since a call can wait for its activation token while the menu it
@@ -219,7 +232,7 @@ fn command(script: &Path, call: &Call) -> Command {
             None => command.env_remove(var),
         };
     }
-    let retv = (call.retv as u8).to_string();
+    let retv = call.retv.code().to_string();
     let vars: [(&[&str], Option<&str>); 4] = [
         (&["SIEB_RETV", "ROFI_RETV"], Some(&retv)),
         (&["SIEB_INFO", "ROFI_INFO"], call.info.as_deref()),

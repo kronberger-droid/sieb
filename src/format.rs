@@ -213,6 +213,7 @@ pub(crate) const MENU_OPTIONS: &[&str] = &[
     "data",
     "new-selection",
     "markup-rows",
+    "custom-keys",
 ];
 
 /// An object with `text` is a row; one made of option keys sets menu
