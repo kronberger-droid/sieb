@@ -48,16 +48,15 @@ lists the entry's fields: username and URIs with their values, the rest
 by name, and the notes in full below them. Enter on a field queues it and
 goes back to the entries, so a form can take the username of one entry
 and the password of another; a row on top then types the queue, Tab
-between the fields. Ctrl+Enter types or copies a single field. Notes are
-copied or opened in `$EDITOR` through `rbw edit`, which handles logins
-and notes. Copies are marked sensitive and cleared after 30 seconds. The
-passwords go from rbw straight into `wtype` or `wl-copy`, never through
-the script. A value that is empty or spans several lines is not typed,
+between the fields. Ctrl+Enter types or copies a single field. Notes can
+be copied; nothing edits, since `rbw edit` can corrupt entries that
+carry their own item key (doy/rbw#364). Copies are marked sensitive and
+cleared after 30 seconds. The passwords go from rbw straight into `wtype`
+or `wl-copy`, never through the script. A value that is empty or spans several lines is not typed,
 and every failure shows as a notification. Rows go out in the JSON
 protocol and picks are acted on by entry id only, so no entry name can
-pose as another entry. Needs rbw, wtype, wl-clipboard, notify-send and a
-terminal (`$TERMINAL` or the first one found); with
-[`sieb-pinentry`](pinentry.md) as rbw's pinentry, the unlock is a sieb
+pose as another entry. Needs rbw, wtype, wl-clipboard and notify-send;
+with [`sieb-pinentry`](pinentry.md) as rbw's pinentry, the unlock is a sieb
 panel too.
 
 ## Streams

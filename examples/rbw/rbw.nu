@@ -20,13 +20,17 @@
 # queued, a row on top of the entries types the queue in order, Tab
 # between the fields.
 #
-# Notes are shown in full under the fields. They can be copied, or opened
-# in $EDITOR through `rbw edit`, which has a login's password on the first
-# line and its notes below it. rbw edits logins and notes only.
+# Notes are shown in full under the fields, and can be copied.
+#
+# Nothing here edits. `rbw edit` (1.15.0) re-encrypts with the account key
+# and leaves an entry's own item key out of the update, so the server
+# drops it and the entry's name, username and TOTP can no longer be
+# decrypted by any client (doy/rbw#364). It also drops passkeys. Edit in
+# the official clients until rbw ships a fix (doy/rbw#368).
 #
 # sieb holds the keyboard while it is open, so typing waits until it has
 # closed and focus is back, and copies clear themselves. Needs rbw, wtype,
-# wl-clipboard, notify-send, and a terminal for `rbw edit`.
+# wl-clipboard and notify-send.
 #
 # The secrets never pass through this script. The field list comes from
 # `rbw get --list-fields`, which prints names only, and the only values
@@ -47,9 +51,6 @@ const CLEAR_AFTER = 30
 # name alone, since a password, TOTP seed, card number or a hidden custom
 # field must not be read here.
 const SHOWN = ["username" "uris" "email" "notes"]
-
-# What `rbw edit` accepts, by the type `rbw list --raw` reports.
-const EDITABLE = ["Login" "Note"]
 
 const GLYPHS = {
     username: "\u{f007}"
@@ -187,10 +188,6 @@ def fields-menu [entry: record, queue: list] {
         let value = if ($value | is-empty) { "" } else { $"  <span alpha='55%'>($value | shown)</span>" }
         emit {text: $"($glyph) ($field | shown)($value)", info: ({do: "field", field: $field} | encode)}
     }
-    if $entry.type in $EDITABLE {
-        let what = if $entry.type == "Login" { "password and notes" } else { "note" }
-        emit {text: $"\u{f040} edit the ($what) in $EDITOR", info: ({do: "edit"} | encode)}
-    }
     if "notes" in $fields {
         emit {text: $"($GLYPHS.notes) copy the notes", info: ({do: "copy", field: "notes"} | encode)}
         for line in (read-shown $entry.id "notes" | lines) {
@@ -286,28 +283,6 @@ def act [action: string, ...args: string] {
     ^setsid -f sh -c $program rbw ...$delays ...$args o+e> /dev/null
 }
 
-# The words that run a command in a terminal, as in launcher/drun.nu.
-def terminal [] {
-    let term = if ($env.TERMINAL? | is-not-empty) {
-        $env.TERMINAL
-    } else {
-        [xdg-terminal-exec foot kitty alacritty wezterm ghostty rio]
-        | where {|term| which $term | is-not-empty }
-        | get 0?
-        | default xterm
-    }
-    match ($term | path basename) {
-        "xdg-terminal-exec" | "foot" | "kitty" => [$term]
-        "wezterm" => [$term start --]
-        _ => [$term -e]
-    }
-}
-
-# `rbw edit` in a terminal of its own, which runs $EDITOR on the entry.
-def edit [id: string] {
-    ^setsid -f ...(terminal) rbw edit $id o+e> /dev/null
-}
-
 def main [choice?: string] {
     if $choice == null { return (entries-menu []) }
     let data = $env.ROFI_DATA? | decode
@@ -341,7 +316,6 @@ def main [choice?: string] {
         }
         "type" if $entry != null and $field != null => { act type $entry.id $field }
         "copy" if $entry != null and $field != null => { act copy $entry.id $field }
-        "edit" if $entry != null and $entry.type in $EDITABLE => { edit $entry.id }
         _ => {}
     }
 }
