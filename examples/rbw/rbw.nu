@@ -12,13 +12,14 @@
 # the keyboard instead of taking a password typed into the picker.
 #
 # Enter on a login types its username, Tab and password into the window
-# sieb was opened over. Ctrl+Enter (ROFI_RETV 10) lists the entry's fields
-# instead, and so does Enter on a note, card, identity or SSH key. There,
-# Enter queues a field and goes back to the entries, so a form can be
-# filled from the username of one entry and the password of another.
-# Ctrl+Enter types or copies that one field right away. Once something is
-# queued, a row on top of the entries types the queue in order, Tab
-# between the fields.
+# sieb was opened over. ENTRY_KEYS copy or type one of its fields straight
+# from the list, as rofi-rbw's do. Ctrl+Enter (ROFI_RETV 10) lists the
+# entry's fields instead, and so does Enter on a note, card, identity or
+# SSH key. There, Enter queues a field and goes back to the entries, so a
+# form can be filled from the username of one entry and the password of
+# another; Ctrl+Enter types the field right away and FIELD_KEYS copy it.
+# Once something is queued, a row on top of the entries types the queue in
+# order, Tab between the fields. The keys are sieb's `custom-keys`.
 #
 # Notes are shown in full under the fields, and can be copied.
 #
@@ -123,13 +124,36 @@ def queue-text [queue: list]: nothing -> string {
     $queue | each {|it| $"($it.field | plain)@($it.name | plain)" } | str join ", "
 }
 
-def menu-header [options: record] {
+# Keys on the entry list, each acting on one field of the selected entry.
+# sieb sends the Nth as ROFI_RETV 10+N.
+const ENTRY_KEYS = [
+    [key action field];
+    ["Alt+u" copy username]
+    ["Alt+p" copy password]
+    ["Alt+t" copy totp]
+    ["Alt+Shift+u" type username]
+    ["Alt+Shift+p" type password]
+]
+# Keys on the field list, acting on the selected field.
+const FIELD_KEYS = [
+    [key action];
+    ["Alt+c" copy]
+]
+
+# What the key behind `retv` does, out of `keys`, or null for Enter,
+# Ctrl+Enter and anything unbound.
+def custom-key [keys: list, retv: int]: nothing -> any {
+    if $retv > 10 { $keys | get --optional ($retv - 11) }
+}
+
+def menu-header [options: record, keys: list = []] {
     print '{"sieb": 1}'
-    emit ({prompt: "rbw", no-custom: true, markup-rows: true} | merge $options)
+    let custom = $keys | get --optional key | default [] | str join ","
+    emit ({prompt: "rbw", no-custom: true, markup-rows: true, custom-keys: $custom} | merge $options)
 }
 
 def entries-menu [queue: list] {
-    menu-header {data: ({queue: $queue} | encode)}
+    menu-header {data: ({queue: $queue} | encode)} $ENTRY_KEYS
     if (^rbw unlocked | complete).exit_code != 0 {
         emit {message: "The vault is locked: run rbw unlock first"}
         emit {text: "locked", selectable: false}
@@ -138,11 +162,18 @@ def entries-menu [queue: list] {
     let list = ^rbw list --raw | complete
     if $list.exit_code != 0 {
         emit {message: $"rbw list failed: ($list.stderr | str trim | plain)"}
-        emit {text: "failed", selectable: false}
+        # rbw lists all or nothing, so one entry that no longer decrypts
+        # hides the rest. `rbw edit` leaves entries like that behind.
+        let hint = if ($list.stderr =~ "invalid mac") {
+            "an entry no longer decrypts: repair or delete it in another client (doy/rbw#364)"
+        } else {
+            "failed"
+        }
+        emit {text: $hint, selectable: false}
         return
     }
     if ($queue | is-empty) {
-        emit {message: "Enter: type login    Ctrl+Enter: fields"}
+        emit {message: "Enter: type login    Ctrl+Enter: fields    Alt+u/p/t: copy    Alt+Shift+u/p: type"}
     } else {
         emit {message: $"queued: (queue-text $queue)"}
         emit {text: "\u{f11c} type the queue", info: ({do: "type-queue"} | encode)}
@@ -168,13 +199,13 @@ def read-shown [id: string, field: string]: nothing -> string {
 }
 
 def fields-menu [entry: record, queue: list] {
-    let hint = "Enter: queue    Ctrl+Enter: type or copy"
+    let hint = "Enter: queue    Ctrl+Enter: type    Alt+c: copy"
     let message = if ($queue | is-empty) { $hint } else { $"($hint)    queued: (queue-text $queue)" }
     menu-header {
         prompt: ($entry.name | plain)
         message: $message
         data: ({queue: $queue, entry: $entry} | encode)
-    }
+    } $FIELD_KEYS
     emit {text: "\u{f060} back", info: ({do: "back"} | encode)}
     let listed = ^rbw get --list-fields $entry.id | complete
     if $listed.exit_code != 0 {
@@ -194,18 +225,6 @@ def fields-menu [entry: record, queue: list] {
             emit {text: $"<span alpha='70%'>($line | shown)</span>", selectable: false}
         }
     }
-}
-
-# Ctrl+Enter on a field: what to do with it on its own.
-def field-menu [entry: record, field: string, queue: list] {
-    menu-header {
-        prompt: ($entry.name | plain)
-        message: ($field | plain)
-        data: ({queue: $queue, entry: $entry} | encode)
-    }
-    emit {text: "\u{f11c} type it", info: ({do: "type", field: $field} | encode)}
-    emit {text: "\u{f0c5} copy it", info: ({do: "copy", field: $field} | encode)}
-    emit {text: "\u{f060} back", info: ({do: "fields"} | encode)}
 }
 
 # The sh side, run detached so sieb closes and focus goes back. $1 to $3
@@ -290,12 +309,16 @@ def main [choice?: string] {
     let entry = $data.entry? | valid-entry
     let pick = $env.ROFI_INFO? | decode
     let field = $pick.field? | valid-field
-    let more = ($env.ROFI_RETV? | default "") == "10"
+    let retv = try { $env.ROFI_RETV? | default "1" | into int } catch { 1 }
+    let more = $retv == 10
     match ($pick.do? | default "") {
         "entry" => {
             let picked = $pick | valid-entry
             if $picked == null { return }
-            if $picked.type == "Login" and not $more {
+            let key = custom-key $ENTRY_KEYS $retv
+            if $key != null {
+                act $key.action $picked.id $key.field
+            } else if $picked.type == "Login" and not $more {
                 act autotype $picked.id
             } else {
                 fields-menu $picked $queue
@@ -306,15 +329,16 @@ def main [choice?: string] {
         }
         "clear" => { entries-menu [] }
         "back" => { entries-menu $queue }
-        "fields" if $entry != null => { fields-menu $entry $queue }
         "field" if $entry != null and $field != null => {
-            if $more {
-                field-menu $entry $field $queue
+            let key = custom-key $FIELD_KEYS $retv
+            if $key != null {
+                act $key.action $entry.id $field
+            } else if $more {
+                act type $entry.id $field
             } else {
                 entries-menu ($queue | append {id: $entry.id, field: $field, name: $entry.name})
             }
         }
-        "type" if $entry != null and $field != null => { act type $entry.id $field }
         "copy" if $entry != null and $field != null => { act copy $entry.id $field }
         _ => {}
     }
