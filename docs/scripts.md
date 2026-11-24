@@ -33,6 +33,11 @@ menu options are `prompt`, `message`, `data`, `no-custom`, `keep-filter`,
 `no-filter`, `complete`, `new-selection`, `markup-rows` and
 `custom-keys`.
 
+`new-selection` counts rows from 0 and can come anywhere in the output.
+Rows are shown as they arrive, so the selection moves once that row is
+in, and to the last row if the script ends before it. Moving or typing
+first keeps the selection where the user put it.
+
 `custom-keys` is sieb's own: up to nine keys, separated by commas, that
 pick the selection like Enter but send `ROFI_RETV` 11, 12 and on, in the
 order given, as rofi's `kb-custom-2` and up would. A key is `Control`,

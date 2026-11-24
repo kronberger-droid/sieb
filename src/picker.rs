@@ -16,6 +16,9 @@ pub struct Picker {
     selected: u32,
     scroll: u32,
     lines: u32,
+    /// A rank a menu asked to have selected, kept until the row is there:
+    /// rows stream in, so it may not exist yet when the menu appears.
+    wanted: Option<u32>,
 }
 
 impl Picker {
@@ -25,6 +28,7 @@ impl Picker {
             selected: 0,
             scroll: 0,
             lines: lines.max(1),
+            wanted: None,
         }
     }
 
@@ -86,6 +90,7 @@ impl Picker {
             // New query, new ranking: the old position means nothing.
             self.selected = 0;
             self.scroll = 0;
+            self.wanted = None;
         }
         changed
     }
@@ -93,6 +98,12 @@ impl Picker {
     /// Moves the selection by `delta` ranks within `count` matches. Stops at
     /// the ends rather than wrapping.
     pub fn move_by(&mut self, delta: i64, count: u32) {
+        // The user chose a row: that wins over one a menu asked for.
+        self.wanted = None;
+        self.step(delta, count);
+    }
+
+    fn step(&mut self, delta: i64, count: u32) {
         if count == 0 {
             return;
         }
@@ -110,11 +121,34 @@ impl Picker {
         self.move_by(pages * self.lines as i64, count);
     }
 
-    /// Keeps the selection valid while matches stream in or drop out.
+    /// Asks for `rank` to be selected once it has a row, as a menu's
+    /// `new-selection` does. Moving or typing before then keeps the
+    /// selection where the user put it.
+    pub fn want(&mut self, rank: Option<u32>) {
+        self.wanted = rank;
+    }
+
+    /// Whether a wanted rank is still waiting for its row.
+    pub fn waiting(&self) -> bool {
+        self.wanted.is_some()
+    }
+
+    /// Every row is in: a wanted rank past the end settles for the last.
+    pub fn land(&mut self, count: u32) {
+        if let Some(rank) = self.wanted.take() {
+            self.step(rank as i64 - self.selected as i64, count);
+        }
+    }
+
+    /// Keeps the selection valid while matches stream in or drop out, and
+    /// moves it to a wanted rank as soon as that row has arrived.
     pub fn clamp(&mut self, count: u32) {
         self.selected = self.selected.min(count.saturating_sub(1));
         self.scroll = self.scroll.min(count.saturating_sub(self.lines));
         self.follow();
+        if self.wanted.is_some_and(|rank| rank < count) {
+            self.land(count);
+        }
     }
 
     /// The list now shows `lines` rows, as when a message box takes some
@@ -182,6 +216,50 @@ mod tests {
         let mut picker = Picker::new(5);
         picker.insert(query);
         picker
+    }
+
+    #[test]
+    fn wanted_rank_waits_for_its_row() {
+        let mut picker = Picker::new(5);
+        picker.want(Some(7));
+        // The first rows of a menu that is still printing.
+        picker.clamp(1);
+        picker.clamp(7);
+        assert_eq!(picker.selected(), 0);
+        assert!(picker.waiting());
+        picker.clamp(8);
+        assert_eq!(picker.selected(), 7);
+        assert_eq!(picker.scroll(), 3);
+        // Landed once: later rows leave it alone.
+        picker.move_by(-1, 8);
+        picker.clamp(20);
+        assert_eq!(picker.selected(), 6);
+    }
+
+    #[test]
+    fn moving_or_typing_gives_up_the_wanted_rank() {
+        let mut picker = Picker::new(5);
+        picker.want(Some(7));
+        picker.clamp(3);
+        picker.move_by(1, 3);
+        picker.clamp(20);
+        assert_eq!(picker.selected(), 1);
+
+        picker.want(Some(7));
+        picker.insert("a");
+        picker.clamp(20);
+        assert_eq!(picker.selected(), 0);
+    }
+
+    #[test]
+    fn wanted_rank_past_the_end_lands_on_the_last_row() {
+        let mut picker = Picker::new(5);
+        picker.want(Some(7));
+        picker.clamp(4);
+        assert_eq!(picker.selected(), 0);
+        picker.land(4);
+        assert_eq!(picker.selected(), 3);
+        assert!(!picker.waiting());
     }
 
     #[test]

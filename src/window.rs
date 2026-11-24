@@ -131,7 +131,7 @@ struct Menu {
     prompt: Option<String>,
     /// A line of text above the list.
     message: Option<String>,
-    /// Rank to select when the menu appears.
+    /// Rank to select, once the row is there.
     new_selection: Option<u32>,
     /// Typed text that matches nothing cannot be submitted.
     no_custom: bool,
@@ -920,16 +920,12 @@ impl App {
             self.picker.clear();
         }
         self.picker.clamp(0);
+        // A menu is shown on its first row, with the rest still on their
+        // way, so the picker holds the rank until its row is in.
+        self.picker.want(self.menu.new_selection);
         self.apply_filter();
         // Completions belonged to the old menu, and the query may be new.
         self.schedule_completions();
-        if let Some(rank) = self.menu.new_selection {
-            // The script printed its rows before exiting, but they may still
-            // be in flight: give the matcher a moment so a selection near
-            // the end has a row to land on.
-            self.matcher.settle(Duration::from_millis(50));
-            self.picker.select(rank, self.matcher.matched());
-        }
         self.redraw();
     }
 
@@ -940,6 +936,7 @@ impl App {
                 if key == "no-filter" {
                     self.apply_filter();
                 }
+                self.option_changed(&key);
                 self.redraw();
                 return;
             }
@@ -959,6 +956,7 @@ impl App {
                     if key == "no-filter" {
                         self.apply_filter();
                     }
+                    self.option_changed(&key);
                     self.redraw();
                 }
                 _ => {}
@@ -1007,7 +1005,24 @@ impl App {
                 if !status.success() {
                     eprintln!("sieb: {path} exited with {status}");
                 }
+                let visible = self.script.as_ref().and_then(|script| script.visible);
+                if visible == Some(call) && self.picker.waiting() {
+                    // No more rows are coming, but the last may not be
+                    // ranked yet: a rank past the end takes the last row.
+                    self.matcher.settle(Duration::from_millis(50));
+                    self.refresh();
+                    self.picker.land(self.matcher.matched());
+                    self.redraw();
+                }
             }
+        }
+    }
+
+    /// An option that arrived with its menu already up.
+    fn option_changed(&mut self, key: &str) {
+        if key == "new-selection" {
+            self.picker.want(self.menu.new_selection);
+            self.refresh();
         }
     }
 
