@@ -217,7 +217,7 @@ pub fn complete(
 
 /// The script's process, with the call's environment set and stdout piped.
 fn command(script: &Path, call: &Call) -> Command {
-    let mut command = Command::new(script);
+    let mut command = Command::new(program(script));
     command
         .args(&call.arg)
         .stdin(Stdio::null())
@@ -251,6 +251,18 @@ fn command(script: &Path, call: &Call) -> Command {
         }
     }
     command
+}
+
+/// What to execute for `script`. A name without a slash is looked up on
+/// `PATH` when executed, which misses `--script menu.nu` given from the
+/// script's own directory: a file of that name here wins, as it would for
+/// any other file argument, and `PATH` stays the fallback.
+fn program(script: &Path) -> PathBuf {
+    if script.components().count() == 1 && script.is_file() {
+        Path::new(".").join(script)
+    } else {
+        script.to_owned()
+    }
 }
 
 fn failed_status() -> ExitStatus {

@@ -16,6 +16,9 @@ the picked row's `info` in `ROFI_INFO`, and the menu's `data`
 in `ROFI_DATA`. Each also exists as `SIEB_*`, and `SIEB_QUERY` holds the
 query.
 
+A script named without a slash is the file of that name in the current
+directory when there is one, else a program on `PATH`.
+
 sieb takes the keyboard right away, and its panel opens once the first
 menu's first row is in, or empty after 150ms when the script takes longer.
 What is typed in the meantime goes into the query.
