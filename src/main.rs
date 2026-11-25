@@ -1,4 +1,7 @@
+use std::fs::File;
 use std::io::{self, BufReader, BufWriter, IsTerminal, Write};
+use std::mem::ManuallyDrop;
+use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -11,6 +14,7 @@ use sieb::format::Format;
 use sieb::layout::Layout;
 use sieb::matcher::{self, Matcher, Print};
 use sieb::render::Theme;
+use sieb::secret::{self, Secret};
 use sieb::{config, script, window};
 
 /// dmenu-first Wayland picker.
@@ -52,6 +56,11 @@ struct Cli {
     #[arg(short, long, value_name = "[LABEL:]SCRIPT", conflicts_with = "filter")]
     script: Vec<script::Mode>,
 
+    /// Ask for a password instead of a pick: no list, the typing shown as
+    /// dots, and what was typed printed on Enter
+    #[arg(long, conflicts_with_all = ["script", "filter", "json", "field", "index"])]
+    password: bool,
+
     /// Config file [default: $XDG_CONFIG_HOME/sieb/config.toml]
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
@@ -62,6 +71,10 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cli.password {
+        // Before anything else: no core dump or debugger gets the typing.
+        secret::harden();
+    }
     let case = if cli.insensitive {
         CaseMatching::Ignore
     } else {
@@ -89,21 +102,29 @@ fn main() -> ExitCode {
 fn pick(case: CaseMatching, cli: Cli, format: Format, print: Print) -> ExitCode {
     // Read before anything else, so a broken config fails fast instead of
     // after the window is up.
+    let own_placeholder = cli.appearance.placeholder.is_some();
     let look = config::load(cli.config.as_deref())
         .map_err(|err| err.to_string())
         .and_then(|file| cli.appearance.over(file).resolve());
-    let (font, layout, theme) = match look {
+    let (font, layout, mut theme) = match look {
         Ok(look) => look,
         // Shown in the default look, the one asked for being what broke.
         Err(err) => return fail_shown("config error", err, None),
     };
+    // The config's placeholder is written for a search field, and would
+    // read like one over a password. One given with the flag is meant.
+    if cli.password && !own_placeholder {
+        theme.placeholder.clear();
+    }
     let look = (font.clone(), layout, theme.clone());
 
     let wake = match window::wake() {
         Ok(wake) => wake,
         Err(err) => return fail(err),
     };
-    let input = if cli.script.is_empty() {
+    let input = if cli.password {
+        window::Input::Secret { message: None }
+    } else if cli.script.is_empty() {
         window::Input::Stdin {
             format,
             field: cli.field,
@@ -128,11 +149,33 @@ fn pick(case: CaseMatching, cli: Cli, format: Format, print: Print) -> ExitCode 
         }
         Ok(window::Outcome::Cancel) => ExitCode::FAILURE,
         Ok(window::Outcome::Quit) => ExitCode::SUCCESS,
-        Ok(window::Outcome::Secret(_)) => unreachable!("only password mode asks for a secret"),
+        Ok(window::Outcome::Secret(secret)) => {
+            if !secret.is_locked() {
+                // Usually RLIMIT_MEMLOCK. Worth knowing, not worth refusing.
+                eprintln!("sieb: could not lock the password out of swap");
+            }
+            print_secret(&secret)
+        }
         Ok(window::Outcome::Failed(err)) => fail_shown("script failed", err, Some(look)),
         // The font or the compositor, so in the default look. Where it is
         // the compositor, the notice fails the same way and stays away.
         Err(err) => fail_shown("could not start", err, None),
+    }
+}
+
+/// Writes the password and a newline straight to fd 1. std's `Stdout` is a
+/// `LineWriter`, whose buffer would keep a copy that nobody wipes.
+fn print_secret(secret: &Secret) -> ExitCode {
+    // SAFETY: fd 1 is open for the life of the process. ManuallyDrop,
+    // since it is not ours to close.
+    let stdout = ManuallyDrop::new(unsafe { File::from_raw_fd(1) });
+    let mut out = &*stdout;
+    match out
+        .write_all(secret.as_bytes())
+        .and_then(|()| out.write_all(b"\n"))
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => fail(format!("writing the password: {err}")),
     }
 }
 

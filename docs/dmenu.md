@@ -22,6 +22,19 @@ home is usable from its first line while the counter climbs.
 `--filter QUERY` prints every match in rank order without opening a
 window, which is handy in tests and pipelines.
 
+## Passwords
+
+`--password` asks for a password instead of a pick: no list, the typing
+shown as dots, and what was typed printed on Enter. Cancelling exits 1.
+
+```nu
+let pass = (sieb --password --prompt "Wi-Fi password")
+```
+
+The typing is kept the way [`sieb-pinentry`](pinentry.md#what-it-protects)
+keeps it. Once printed it is the caller's to look after, and a shell
+variable is not a safe place for long.
+
 ## Errors
 
 A config file that does not load, or a script that cannot start or fails
