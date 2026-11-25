@@ -129,6 +129,10 @@ pub struct Appearance {
     #[arg(long, value_name = "BOOL")]
     pub scrollbar: Option<bool>,
 
+    /// Ask the compositor to blur what is behind the panel [default: false]
+    #[arg(long, value_name = "BOOL")]
+    pub blur: Option<bool>,
+
     #[command(flatten)]
     #[serde(default)]
     pub colors: Colors,
@@ -299,7 +303,8 @@ impl Appearance {
             placeholder,
             badge,
             counter,
-            scrollbar
+            scrollbar,
+            blur
         );
         let (mut colors, file) = (self.colors, file.colors);
         merge!(
@@ -402,6 +407,7 @@ impl Appearance {
             badge: self.badge.unwrap_or(d.badge),
             counter: self.counter.unwrap_or(d.counter),
             scrollbar: self.scrollbar.unwrap_or(d.scrollbar),
+            blur: self.blur.unwrap_or(d.blur),
         };
         Ok((
             self.font.unwrap_or_else(|| "sans-serif".into()),

@@ -78,6 +78,9 @@ pub struct Theme {
     /// Show `matched/total` right of the query.
     pub counter: bool,
     pub scrollbar: bool,
+    /// Ask the compositor for blur behind the panel. It shows through a
+    /// background that is not opaque.
+    pub blur: bool,
 }
 
 impl Default for Theme {
@@ -91,6 +94,7 @@ impl Default for Theme {
             badge: String::new(),
             counter: true,
             scrollbar: false,
+            blur: false,
         }
     }
 }
@@ -576,6 +580,30 @@ fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Path {
     pb.finish().expect("rounded rect path")
 }
 
+/// A rounded rectangle of `w` by `h` as whole-pixel rectangles `(x, y, w,
+/// h)`, for a `wl_region`, which has no curves. One per row of a corner
+/// and one for all that lies between. Each row is cut where the curve
+/// crosses its middle, rounded inward, so nothing reaches past the shape
+/// [`rounded_rect`] draws.
+pub fn rounded_rows(w: i32, h: i32, r: f32) -> Vec<(i32, i32, i32, i32)> {
+    let r = r.min(w as f32 / 2.0).min(h as f32 / 2.0).max(0.0);
+    let corner = r.ceil() as i32;
+    let mut rows = Vec::with_capacity(2 * corner as usize + 1);
+    for row in 0..corner {
+        let up = r - (row as f32 + 0.5);
+        let inset = (r - (r * r - up * up).max(0.0).sqrt()).ceil() as i32;
+        let width = w - 2 * inset;
+        if width > 0 {
+            rows.push((inset, row, width, 1));
+            rows.push((inset, h - 1 - row, width, 1));
+        }
+    }
+    if h > 2 * corner {
+        rows.push((0, corner, w, h - 2 * corner));
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +702,35 @@ mod tests {
         let start = std::time::Instant::now();
         panel(&mut canvas, w, h, scale, &layout, &theme, &mut text, &view);
         eprintln!("frame at {w}x{h} in {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn rounded_rows_stay_inside_the_rounded_rect() {
+        let (w, h, r) = (800, 300, 8.0_f32);
+        let rows = rounded_rows(w, h, r);
+        // The body between the corners is one rectangle of the full width.
+        assert!(rows.contains(&(0, 8, w, h - 16)));
+        // Every row is covered once and none reaches past the panel.
+        let covered: i32 = rows.iter().map(|&(_, _, _, rh)| rh).sum();
+        assert_eq!(covered, h);
+        for &(x, y, rw, rh) in &rows {
+            assert!(x >= 0 && y >= 0 && x + rw <= w && y + rh <= h);
+            // Symmetric, and in a corner no wider than the curve there.
+            assert_eq!(x, w - (x + rw));
+            let up = (r - (y as f32 + 0.5)).max(y as f32 + rh as f32 - 0.5 - (h as f32 - r));
+            if up > 0.0 {
+                assert!(x as f32 >= r - (r * r - up * up).sqrt());
+            }
+        }
+        // The outermost rows are cut the most.
+        let top = rows.iter().find(|row| row.1 == 0).unwrap();
+        let next = rows.iter().find(|row| row.1 == 1).unwrap();
+        assert!(top.0 > next.0 && next.0 > 0);
+    }
+
+    #[test]
+    fn rounded_rows_without_a_radius_are_the_rectangle() {
+        assert_eq!(rounded_rows(40, 20, 0.0), [(0, 0, 40, 20)]);
     }
 
     #[test]

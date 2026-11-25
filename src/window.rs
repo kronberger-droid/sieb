@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::{
     activation::{ActivationHandler, ActivationState, RequestData},
-    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
     data_device_manager::{
         DataDeviceManagerState,
         data_device::{DataDevice, DataDeviceHandler},
@@ -37,6 +37,10 @@ use smithay_client_toolkit::{
                 wl_data_device::WlDataDevice, wl_data_device_manager::DndAction, wl_keyboard,
                 wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface,
             },
+        },
+        protocols::ext::background_effect::v1::client::{
+            ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
+            ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
         },
         protocols::wp::{
             cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1},
@@ -552,6 +556,16 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         .as_ref()
         .map(|m| m.get_fractional_scale(layer.wl_surface(), &qh, ()));
 
+    // Optional as well, and only asked for by a theme that wants blur. It
+    // goes on the backdrop: the panel is a subsurface, and compositors
+    // take a background effect on the surface with the role.
+    let background_effect = options
+        .theme
+        .blur
+        .then(|| globals.bind::<ExtBackgroundEffectManagerV1, _, _>(&qh, 1..=1, ()))
+        .and_then(Result::ok)
+        .map(|manager| manager.get_background_effect(layer.wl_surface(), &qh, ()));
+
     let (panel_subsurface, panel) =
         subcompositor.create_subsurface(layer.wl_surface().clone(), &qh);
     let panel_viewport = viewporter.get_viewport(&panel, &qh, ());
@@ -608,6 +622,9 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         panel_viewport,
         panel_buffer: None,
         fractional,
+        compositor,
+        background_effect,
+        blurred: None,
 
         picker: Picker::new(options.layout.lines),
         script,
@@ -704,6 +721,12 @@ struct App {
     // Held so the slot stays alive while the compositor may still read it.
     panel_buffer: Option<Buffer>,
     fractional: Option<WpFractionalScaleV1>,
+    /// Kept for the regions the blur is described with.
+    compositor: CompositorState,
+    /// There when the theme asks for blur and the compositor offers it.
+    background_effect: Option<ExtBackgroundEffectSurfaceV1>,
+    /// The panel rectangle the compositor was last told to blur behind.
+    blurred: Option<(i32, i32, u32, u32)>,
 
     options: Options,
     matcher: Matcher,
@@ -1673,8 +1696,33 @@ impl App {
         self.panel_buffer = Some(buffer);
 
         // Centered, like a dialog. Applied with the parent's commit.
-        self.panel_subsurface
-            .set_position(((width - pw) / 2) as i32, ((height - ph) / 2) as i32);
+        let (x, y) = (((width - pw) / 2) as i32, ((height - ph) / 2) as i32);
+        self.panel_subsurface.set_position(x, y);
+        self.blur_behind(x, y, pw, ph);
+    }
+
+    /// Tells the compositor to blur what is behind the panel, when the
+    /// panel is somewhere else than last time. The region is in backdrop
+    /// coordinates and takes effect with the backdrop's commit, like the
+    /// panel's position.
+    fn blur_behind(&mut self, x: i32, y: i32, width: u32, height: u32) {
+        let Some(effect) = &self.background_effect else {
+            return;
+        };
+        let rect = (x, y, width, height);
+        if self.blurred == Some(rect) {
+            return;
+        }
+        let Ok(region) = Region::new(&self.compositor) else {
+            return;
+        };
+        let radius = self.options.theme.radius;
+        for (rx, ry, rw, rh) in render::rounded_rows(width as i32, height as i32, radius) {
+            region.add(x + rx, y + ry, rw, rh);
+        }
+        // The compositor copies the region, so it can go right after.
+        effect.set_blur_region(Some(region.wl_region()));
+        self.blurred = Some(rect);
     }
 }
 
@@ -1833,6 +1881,10 @@ impl Dispatch<WpFractionalScaleV1, ()> for App {
 delegate_noop!(App: ignore WpViewporter);
 delegate_noop!(App: ignore WpViewport);
 delegate_noop!(App: ignore WpFractionalScaleManagerV1);
+// Its one event lists what the compositor can do. Blur is all there is to
+// ask for, and asking a compositor without it changes nothing.
+delegate_noop!(App: ignore ExtBackgroundEffectManagerV1);
+delegate_noop!(App: ExtBackgroundEffectSurfaceV1);
 
 impl CompositorHandler for App {
     fn scale_factor_changed(

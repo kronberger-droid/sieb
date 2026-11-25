@@ -16,6 +16,12 @@ Beyond font, size and colors, a theme sets the spacing and padding of
 each part, rows as rounded boxes, a placeholder, a badge pill left of the
 prompt, a scrollbar, and whether the counter and separator show.
 
+`blur = true` asks the compositor to blur what is behind the panel,
+through `ext-background-effect-v1`. It shows where `colors.background`
+is not opaque, and a compositor without the protocol draws the panel as
+before. On niri the blur is of the wallpaper alone unless a layer rule
+for the `sieb` namespace sets `background-effect { xray false }`.
+
 Colors left unset follow a related one, so `match` follows `accent` and
 `selected-text` follows `text`. A theme only names what differs.
 

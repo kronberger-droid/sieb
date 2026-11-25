@@ -24,6 +24,7 @@ placeholder = ""      # shown while the query is empty
 badge = ""            # a pill left of the prompt, empty for none
 counter = true        # matched/total right of the query
 scrollbar = false
+blur = false          # blur behind the panel, where the compositor can
 
 # Colors without a default here fall back to the one named after them.
 [colors]
