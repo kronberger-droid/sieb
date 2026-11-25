@@ -1,4 +1,4 @@
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -8,7 +8,9 @@ use clap::Parser;
 use nucleo::pattern::CaseMatching;
 
 use sieb::format::Format;
+use sieb::layout::Layout;
 use sieb::matcher::{self, Matcher, Print};
+use sieb::render::Theme;
 use sieb::{config, script, window};
 
 /// dmenu-first Wayland picker.
@@ -87,14 +89,15 @@ fn main() -> ExitCode {
 fn pick(case: CaseMatching, cli: Cli, format: Format, print: Print) -> ExitCode {
     // Read before anything else, so a broken config fails fast instead of
     // after the window is up.
-    let file = match config::load(cli.config.as_deref()) {
-        Ok(file) => file,
-        Err(err) => return fail(err),
+    let look = config::load(cli.config.as_deref())
+        .map_err(|err| err.to_string())
+        .and_then(|file| cli.appearance.over(file).resolve());
+    let (font, layout, theme) = match look {
+        Ok(look) => look,
+        // Shown in the default look, the one asked for being what broke.
+        Err(err) => return fail_shown("config error", err, None),
     };
-    let (font, layout, theme) = match cli.appearance.over(file).resolve() {
-        Ok(resolved) => resolved,
-        Err(err) => return fail(err),
-    };
+    let look = (font.clone(), layout, theme.clone());
 
     let wake = match window::wake() {
         Ok(wake) => wake,
@@ -126,9 +129,43 @@ fn pick(case: CaseMatching, cli: Cli, format: Format, print: Print) -> ExitCode 
         Ok(window::Outcome::Cancel) => ExitCode::FAILURE,
         Ok(window::Outcome::Quit) => ExitCode::SUCCESS,
         Ok(window::Outcome::Secret(_)) => unreachable!("only password mode asks for a secret"),
-        Ok(window::Outcome::Failed(err)) => fail(err),
-        Err(err) => fail(err),
+        Ok(window::Outcome::Failed(err)) => fail_shown("script failed", err, Some(look)),
+        // The font or the compositor, so in the default look. Where it is
+        // the compositor, the notice fails the same way and stays away.
+        Err(err) => fail_shown("could not start", err, None),
     }
+}
+
+/// What a panel looks like: its font, geometry and theme.
+type Look = (String, Layout, Theme);
+
+/// Reports `err` on stderr and, when that is not a terminal, in a panel of
+/// its own to read and dismiss. Started from a keybind, stderr goes where
+/// nobody looks, and a picker that just does not come up says nothing
+/// about why.
+fn fail_shown(title: &str, err: impl std::fmt::Display, look: Option<Look>) -> ExitCode {
+    let text = err.to_string();
+    eprintln!("sieb: {text}");
+    let look = look.or_else(|| config::Appearance::default().resolve().ok());
+    if !io::stderr().is_terminal()
+        && let Some((font, layout, theme)) = look
+        && let Ok(wake) = window::wake()
+    {
+        let options = window::Options {
+            prompt: Some("sieb".into()),
+            case: CaseMatching::Smart,
+            font,
+            layout,
+            theme,
+        };
+        let input = window::Input::Notice {
+            title: title.into(),
+            text,
+        };
+        // What stops the notice as well has been said on stderr already.
+        let _ = window::run(options, input, wake);
+    }
+    ExitCode::from(2)
 }
 
 fn filter(

@@ -125,6 +125,12 @@ impl Text {
             .fold(0.0, f32::max)
     }
 
+    /// `text` broken into lines of at most `width` physical pixels at
+    /// `size`, see [`wrap`].
+    pub fn wrap(&mut self, size: f32, width: f32, text: &str) -> Vec<String> {
+        wrap(text, width, |line| self.width(size, line))
+    }
+
     /// Height of one line box at `size`, for vertical centering.
     pub fn line_height(size: f32) -> f32 {
         (size * 1.25).ceil()
@@ -157,6 +163,44 @@ impl Text {
         }
         width
     }
+}
+
+/// Breaks `text` into lines no wider than `width` as `measure` sees them.
+/// The text's own line breaks stay, blank lines go, and a line breaks at
+/// its spaces, or inside a word that is too wide on its own, as a path
+/// may be. Indentation is not kept.
+pub fn wrap(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.lines() {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let start = line.len();
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+            if measure(&line) <= width {
+                continue;
+            }
+            // The word does not fit behind the others: it starts the next
+            // line, in as many pieces as its own width takes.
+            line.truncate(start);
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            for ch in word.chars() {
+                line.push(ch);
+                if measure(&line) > width && line.chars().nth(1).is_some() {
+                    line.pop();
+                    lines.push(std::mem::replace(&mut line, ch.to_string()));
+                }
+            }
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    }
+    lines
 }
 
 /// Has fontconfig drop the faces that add no characters to the ones sorted
@@ -312,6 +356,40 @@ mod tests {
         assert_eq!(mul(255, 255), 255);
         assert_eq!(mul(0, 255), 0);
         assert_eq!(mul(128, 255), 128);
+    }
+
+    /// Wraps with every character one unit wide.
+    fn wrapped(text: &str, width: f32) -> Vec<String> {
+        wrap(text, width, |line| line.chars().count() as f32)
+    }
+
+    #[test]
+    fn wrap_breaks_at_spaces() {
+        assert_eq!(
+            wrapped("one two three four", 9.0),
+            ["one two", "three", "four"]
+        );
+        // Exactly as wide as the room still fits.
+        assert_eq!(wrapped("one two", 7.0), ["one two"]);
+    }
+
+    #[test]
+    fn wrap_keeps_line_breaks_and_drops_blank_lines() {
+        assert_eq!(
+            wrapped("first line\n\n  second\n", 20.0),
+            ["first line", "second"]
+        );
+        assert!(wrapped("", 20.0).is_empty());
+    }
+
+    #[test]
+    fn wrap_splits_a_word_wider_than_the_line() {
+        assert_eq!(
+            wrapped("in /a/long/path here", 6.0),
+            ["in", "/a/lon", "g/path", "here"]
+        );
+        // Room for less than one character still makes progress.
+        assert_eq!(wrapped("abc", 0.5), ["a", "b", "c"]);
     }
 
     /// Fails once the fontconfig crate numbers its variants the way their

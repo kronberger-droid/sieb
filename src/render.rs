@@ -100,6 +100,8 @@ pub struct View<'a> {
     /// A byte range of `message` drawn bold: the completion Tab puts in.
     pub message_mark: Option<Range<usize>>,
     pub query: &'a str,
+    /// Draw the caret behind the query: off where nothing can be typed.
+    pub caret: bool,
     pub rows: Vec<RowView<'a>>,
     /// Index into `rows`.
     pub selected: Option<usize>,
@@ -240,7 +242,7 @@ pub fn panel(
                 );
             }
         }
-        if caret_x >= query_left {
+        if view.caret && caret_x >= query_left {
             let caret_height = line * 0.9;
             let caret_top = input_top + (input_height - caret_height) / 2.0;
             fill(caret_x, caret_top, caret_width, caret_height, 0.0, c.accent);
@@ -627,6 +629,7 @@ mod tests {
             message: None,
             message_mark: None,
             query: "swr",
+            caret: true,
             rows,
             selected: Some(2),
             scroll: 0,

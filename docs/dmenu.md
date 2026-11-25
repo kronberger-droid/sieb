@@ -22,6 +22,14 @@ home is usable from its first line while the counter climbs.
 `--filter QUERY` prints every match in rank order without opening a
 window, which is handy in tests and pipelines.
 
+## Errors
+
+A config file that does not load, or a script that cannot start or fails
+before its first menu, is reported on stderr with exit code 2. Started
+from a keybind, where stderr goes unread, sieb also shows the reason in a
+panel of its own, which Enter or Escape closes. From a terminal it only
+prints.
+
 ## JSON
 
 `--json` reads one JSON value per line, or a single array, which is what

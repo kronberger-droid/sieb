@@ -97,6 +97,10 @@ pub enum Input {
     /// Password mode: no list, the typing shown as dots, and `message` in
     /// the message box. Enter hands back the secret, never as text.
     Secret { message: Option<String> },
+    /// Something to read and dismiss, as why sieb could not start: `title`
+    /// where the query would be and `text` as rows, wrapped to the panel.
+    /// Nothing can be typed or picked; Enter and Escape close it.
+    Notice { title: String, text: String },
 }
 
 /// Where a left press landed. A click needs press and release on the same.
@@ -246,6 +250,9 @@ const HOLD: Duration = Duration::from_millis(150);
 /// typed is lost; past this, an empty panel says sieb is there.
 const OPEN_AFTER: Duration = Duration::from_millis(150);
 
+/// The most rows a notice shows at once. A longer one scrolls.
+const NOTICE_LINES: u32 = 12;
+
 /// Completions of the query, for a menu with the `complete` option.
 #[derive(Default)]
 struct Completions {
@@ -339,9 +346,10 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
     let (events, event_channel) = channel::channel();
     let mut script = None;
     let mut secret = None;
+    let mut notice = None;
     let mut menu = Menu::default();
     let mut print = Print::Text;
-    let matcher = match input {
+    let mut matcher = match input {
         Input::Stdin {
             format,
             field,
@@ -371,8 +379,11 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
                 notify: wake.notify.clone(),
                 session: Session::default(),
             };
-            // No token: the first menu launches nothing.
-            state.start(Call::initial())?;
+            // No token: the first menu launches nothing. A script that
+            // cannot start is the caller's to report, like one that fails.
+            if let Err(err) = state.start(Call::initial()) {
+                return Ok(Outcome::Failed(err));
+            }
             script = Some(state);
             // Shown until the first menu arrives.
             Matcher::new(options.case, wake.notify.clone())
@@ -384,6 +395,14 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
             menu.message = message;
             secret = Some(Secret::new());
             // Stays empty, so rows and clicks on them have nothing to hit.
+            Matcher::new(options.case, wake.notify.clone())
+        }
+        Input::Notice { title, text } => {
+            // The rows are not a list to count or scroll through.
+            options.theme.counter = false;
+            options.theme.scrollbar = false;
+            notice = Some((title, text));
+            // Filled once the font is there to wrap the text with.
             Matcher::new(options.case, wake.notify.clone())
         }
     };
@@ -424,10 +443,30 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
     // configure carrying the output size, and the first frame follows that.
     layer.commit();
 
+    let mut text = text.join().expect("font thread panicked")?;
+    // A notice's rows are its text, wrapped to the room a row has, which
+    // takes the font to measure.
+    let notice = notice.map(|(title, body)| {
+        let layout = &mut options.layout;
+        let room = layout.width - 2.0 * (layout.padding + layout.row_padding);
+        // Measured at scale 1. Glyphs at another scale may come out a hair
+        // wider, so the lines are kept a little short of the room.
+        let lines = text.wrap(layout.font_size, room * 0.98, &body);
+        layout.lines = (lines.len() as u32).clamp(1, NOTICE_LINES);
+        let injector = matcher.injector();
+        for (index, line) in lines.into_iter().enumerate() {
+            let mut row = format::Row::plain(line);
+            row.selectable = false;
+            matcher::push(&injector, index as u32, row);
+        }
+        // Ranked before the first frame, so the panel opens with its text.
+        matcher.settle(Duration::from_millis(50));
+        title
+    });
+
     let (pw, ph) = options.layout.size();
     // Room for two buffers at scale 2 before the pool has to grow.
     let pool = SlotPool::new(pw as usize * ph as usize * 4 * 8, &shm)?;
-    let text = text.join().expect("font thread panicked")?;
     let mut app = App {
         registry: RegistryState::new(&globals),
         seats: SeatState::new(&globals, &qh),
@@ -451,6 +490,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         picker: Picker::new(options.layout.lines),
         script,
         secret,
+        notice,
         menu,
         print,
         wheel: Wheel::default(),
@@ -538,6 +578,8 @@ struct App {
     script: Option<ScriptState>,
     /// Password mode's typing, in place of the query.
     secret: Option<Secret>,
+    /// A notice's title, in place of the query: see [`Input::Notice`].
+    notice: Option<String>,
     /// Options of the script menu on screen.
     menu: Menu,
     /// dmenu mode: what a pick prints.
@@ -698,6 +740,10 @@ impl App {
             self.secret_key(event);
             return;
         }
+        if self.notice.is_some() {
+            self.notice_key(event);
+            return;
+        }
         let ctrl = self.modifiers.ctrl;
         let count = self.matcher.matched();
         // Letters compare both cases, since Caps Lock uppercases the keysym.
@@ -801,6 +847,36 @@ impl App {
         };
         if changed {
             self.redraw();
+        }
+    }
+
+    /// A notice's keys: the ways out, and moving through text longer than
+    /// the panel. Other keys do nothing, so typing meant for the menu that
+    /// did not come up cannot dismiss the reason unread.
+    fn notice_key(&mut self, event: KeyEvent) {
+        let ctrl = self.modifiers.ctrl;
+        let count = self.matcher.matched();
+        let lines = self.picker.lines() as i64;
+        match event.keysym {
+            Keysym::Escape | Keysym::Return | Keysym::KP_Enter => {
+                self.outcome = Some(Outcome::Cancel);
+            }
+            Keysym::c | Keysym::C | Keysym::g | Keysym::G if ctrl => {
+                self.outcome = Some(Outcome::Cancel);
+            }
+            // No row is marked, so the selection only serves to scroll:
+            // it jumps to the far edge of what is shown and one beyond.
+            Keysym::Up | Keysym::KP_Up | Keysym::Page_Up => {
+                let top = self.picker.scroll() as i64 - 1;
+                self.picker.select(top.max(0) as u32, count);
+                self.redraw();
+            }
+            Keysym::Down | Keysym::KP_Down | Keysym::Page_Down => {
+                let bottom = self.picker.scroll() as i64 + lines;
+                self.picker.select(bottom.max(0) as u32, count);
+                self.redraw();
+            }
+            _ => {}
         }
     }
 
@@ -1198,7 +1274,9 @@ impl App {
         let (matched, total) = self.matcher.counts();
         self.picker.fit(layout.lines, matched);
         let scroll = self.picker.scroll();
-        let selected = (matched > 0).then(|| (self.picker.selected() - scroll) as usize);
+        // A notice's rows are text to read: none of them is marked.
+        let selected = (matched > 0 && self.notice.is_none())
+            .then(|| (self.picker.selected() - scroll) as usize);
         let (message, message_mark) = message(&self.menu, &self.completions);
         let rows = self.matcher.window(scroll, self.picker.lines());
         // Password mode draws a dot per character and never the secret, so
@@ -1223,7 +1301,11 @@ impl App {
                     .map(|s| s.modes[s.active].label.as_str())),
             message,
             message_mark,
-            query: dots.as_deref().unwrap_or(self.picker.query()),
+            query: dots
+                .as_deref()
+                .or(self.notice.as_deref())
+                .unwrap_or(self.picker.query()),
+            caret: self.notice.is_none(),
             rows: rows
                 .into_iter()
                 .map(|(entry, indices)| render::RowView {
