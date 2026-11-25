@@ -161,6 +161,9 @@ struct Menu {
     data: Option<String>,
     /// sieb's own: the keys that send `kb-custom-2` and up.
     custom_keys: Vec<Binding>,
+    /// sieb's own: rows in the list, for a menu shorter or longer than the
+    /// theme's `lines`.
+    lines: Option<u32>,
 }
 
 impl Menu {
@@ -182,6 +185,8 @@ impl Menu {
             "complete" => self.complete = value == "true",
             "data" => self.data = Some(value),
             "custom-keys" => self.custom_keys = keys::parse_list(&value),
+            // Not 0: a script's menu always has its list.
+            "lines" => self.lines = value.parse().ok().filter(|&lines| lines > 0),
             // markup-rows is applied while reading rows (format::feed).
             // urgent, active, use-hot-keys, keep-selection, delim, theme:
             // not yet.
@@ -201,6 +206,18 @@ mod tests {
         for key in crate::format::MENU_OPTIONS {
             let known = Menu::default().set(key, "true".into());
             assert!(known || ["sieb", "markup-rows"].contains(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn menu_lines_have_to_be_a_count() {
+        let mut menu = Menu::default();
+        menu.set("lines", "2".into());
+        assert_eq!(menu.lines, Some(2));
+        // The theme's stay for what is no number of rows.
+        for value in ["0", "-1", "two"] {
+            menu.set("lines", value.into());
+            assert_eq!(menu.lines, None, "{value}");
         }
     }
 
@@ -1349,6 +1366,7 @@ impl App {
         let layout = Layout {
             message: self.wrapped.lines.len() as u32,
             buttons: self.script.as_ref().map_or(0, |s| s.modes.len()),
+            lines: self.menu.lines.unwrap_or(theme.lines),
             ..theme
         };
         // Completions come and go while typing; in a box of their own they

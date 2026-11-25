@@ -56,6 +56,8 @@ def confirm-menu [action: string] {
     menu-option prompt Confirmation
     menu-option message "Are you Sure?"
     menu-option no-custom "true"
+    # Two rows, where the theme leaves room for every action.
+    menu-option lines "2"
     row "\u{f012c} yes" info $action
     row "\u{f0156} no"
 }

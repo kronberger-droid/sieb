@@ -45,8 +45,8 @@ Shutdown\0info\x1fpoweroff  row with options
 
 Supported row options are `info`, `meta` and `nonselectable`. Supported
 menu options are `prompt`, `message`, `data`, `no-custom`, `keep-filter`,
-`no-filter`, `complete`, `new-selection`, `markup-rows` and
-`custom-keys`.
+`no-filter`, `complete`, `new-selection`, `markup-rows`, `custom-keys`
+and `lines`.
 
 A `message` too wide for the panel wraps, onto four lines at most.
 
@@ -67,6 +67,10 @@ order given, as rofi's `kb-custom-2` and up would. A key is `Control`,
 they are written with. One key that does not parse leaves the whole list
 unbound, so a typo cannot move the others onto the wrong number. The keys
 apply to the menu that sets them, and win over sieb's own.
+
+`lines` is sieb's own: the rows this menu's list has, in place of the
+theme's `lines`. A two-row confirmation after a longer menu sets it so
+the panel shrinks to fit. The next menu is back at the theme's.
 
 `no-filter` is sieb's own: typing leaves the rows where they are and only
 highlights the ones that match. Enter with text typed submits the text,

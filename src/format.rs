@@ -214,6 +214,7 @@ pub(crate) const MENU_OPTIONS: &[&str] = &[
     "new-selection",
     "markup-rows",
     "custom-keys",
+    "lines",
 ];
 
 /// Menu options rofi has and sieb does not act on. A script may set them
