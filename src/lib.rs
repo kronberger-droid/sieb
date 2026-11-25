@@ -11,5 +11,6 @@ pub mod picker;
 pub mod render;
 pub mod script;
 pub mod secret;
+pub mod session;
 pub mod text;
 pub mod window;

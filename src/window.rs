@@ -69,6 +69,7 @@ use crate::picker::{Accept, Picker, Wheel};
 use crate::render::{self, Theme, View};
 use crate::script::{self, Call, Mode, Retv};
 use crate::secret::Secret;
+use crate::session::{Done, FirstRow, Session, Shown};
 use crate::text::Text;
 use nucleo::pattern::CaseMatching;
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
@@ -191,26 +192,20 @@ mod tests {
     }
 }
 
-/// A call whose menu is not shown yet. The current menu stays up until its
-/// first row arrives, so a script that acts and prints nothing closes sieb
-/// without an empty frame in between.
-struct Pending {
-    id: u32,
+/// The menu of a call that is not shown yet: the rows printed so far and
+/// the options set for them. [`Session`] decides when it goes up.
+struct Incoming {
     matcher: Matcher,
     menu: Menu,
-    /// Why the call runs. An initial call after the first one is a mode
-    /// switch: it keeps the query, like rofi, and shows an empty list
-    /// rather than closing if it prints nothing.
-    retv: Retv,
-    /// Its first row is in, but not yet the one it wants selected: the
-    /// menu waits for that row, so its first frame has the selection in
-    /// place instead of jumping there.
-    held: bool,
 }
 
-impl Pending {
-    fn is_switch(&self) -> bool {
-        self.retv == Retv::Initial && self.id > FIRST_CALL
+impl Incoming {
+    /// Whether the row this menu wants selected has been printed. Ticks
+    /// the matcher, which is not on screen and so not ticked otherwise.
+    fn has_wanted_row(&mut self) -> bool {
+        self.matcher.tick(0);
+        let rows = self.matcher.counts().1;
+        self.menu.new_selection.is_none_or(|rank| rank < rows)
     }
 }
 
@@ -220,9 +215,6 @@ const DOT: &str = "\u{2022}";
 /// What password mode shows in place of the dots while another surface has
 /// the keyboard, so the password is not typed blind into it.
 const NO_FOCUS: &str = "no keyboard: typing goes elsewhere";
-
-/// Id of the very first call, which builds the first menu.
-const FIRST_CALL: u32 = 1;
 
 /// The message box's text: completions while there are any, so they show
 /// where the script's own words would be, else the script's. With
@@ -296,15 +288,6 @@ impl Completions {
     }
 }
 
-/// What the script side is doing. One call at a time.
-enum Busy {
-    Idle,
-    /// A picked call waiting for its activation token before it runs.
-    AwaitingToken(Call),
-    /// Boxed, since a pending menu carries a whole matcher.
-    Running(Box<Pending>),
-}
-
 struct ScriptState {
     modes: Vec<Mode>,
     /// The mode whose script runs.
@@ -312,10 +295,8 @@ struct ScriptState {
     events: Sender<Event>,
     case: CaseMatching,
     notify: Arc<dyn Fn() + Send + Sync>,
-    next_id: u32,
-    /// The call whose menu is on screen.
-    visible: Option<u32>,
-    busy: Busy,
+    /// Which call is on screen and which is on its way in.
+    session: Session<Incoming>,
 }
 
 /// Wakes the event loop when the matcher has new results.
@@ -388,9 +369,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
                 events,
                 case: options.case,
                 notify: wake.notify.clone(),
-                next_id: FIRST_CALL,
-                visible: None,
-                busy: Busy::Idle,
+                session: Session::default(),
             };
             // No token: the first menu launches nothing.
             state.start(Call::initial())?;
@@ -449,7 +428,6 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
     // Room for two buffers at scale 2 before the pool has to grow.
     let pool = SlotPool::new(pw as usize * ph as usize * 4 * 8, &shm)?;
     let text = text.join().expect("font thread panicked")?;
-    let opening = script.is_some();
     let mut app = App {
         registry: RegistryState::new(&globals),
         seats: SeatState::new(&globals, &qh),
@@ -484,7 +462,6 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         text,
         frame_pending: false,
         dirty: false,
-        opening,
 
         size: None,
         scale: 1.0,
@@ -518,7 +495,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         })
         .map_err(|err| err.error)?;
     WaylandSource::new(conn, event_queue).insert(event_loop.handle())?;
-    if app.opening {
+    if app.opening() {
         let timer = Timer::from_duration(OPEN_AFTER);
         event_loop
             .handle()
@@ -577,10 +554,6 @@ struct App {
     frame_pending: bool,
     /// Something changed since the last draw.
     dirty: bool,
-    /// A script's first menu is still on its way: the backdrop is up and
-    /// the panel is not, so sieb opens on the menu instead of on an empty
-    /// list that fills a moment later.
-    opening: bool,
 
     /// Logical output size, known after the first configure.
     size: Option<(u32, u32)>,
@@ -694,7 +667,7 @@ impl App {
     /// Picks up new matcher results.
     fn refresh(&mut self) {
         // The wake is shared with a menu on its way in.
-        self.release(None);
+        self.release();
         let status = self.matcher.tick(0);
         self.picker.clamp(self.matcher.matched());
         if status.changed {
@@ -874,9 +847,7 @@ impl App {
             self.outcome = Some(Outcome::Accept(self.output(accept), code));
             return;
         };
-        // One call at a time: a second Enter while the script works is
-        // dropped rather than queued against a menu that is about to go.
-        if !matches!(script.busy, Busy::Idle) {
+        if !script.session.idle() {
             return;
         }
         let query = self.picker.query();
@@ -903,7 +874,7 @@ impl App {
         // Any call may launch something, and only the script knows which.
         // The token comes back in `new_token`, which then starts the call.
         if let (Some(activation), Some(seat)) = (&self.activation, &self.seat) {
-            script.busy = Busy::AwaitingToken(call);
+            script.session.await_token(call);
             activation.request_token(
                 &self.qh,
                 RequestData {
@@ -955,18 +926,12 @@ impl App {
         self.redraw();
     }
 
-    /// Puts a pending call's menu on screen.
-    fn show(&mut self, pending: Pending) {
-        if let Some(script) = &mut self.script {
-            script.visible = Some(pending.id);
-        }
-        self.opening = false;
-        // The first menu has no pick behind it that the query belonged to:
-        // what is typed by then was typed ahead, for this menu.
-        let keep_query =
-            pending.menu.keep_filter || pending.is_switch() || pending.id == FIRST_CALL;
-        self.matcher = pending.matcher;
-        self.menu = pending.menu;
+    /// Puts a call's menu on screen, when the session says it is time.
+    fn show(&mut self, shown: Shown<Incoming>) {
+        let Incoming { matcher, menu } = shown.menu;
+        let keep_query = shown.keep_query || menu.keep_filter;
+        self.matcher = matcher;
+        self.menu = menu;
         if !keep_query {
             self.picker.clear();
         }
@@ -998,11 +963,10 @@ impl App {
         };
         match event {
             // Options for the call on its way in, or the one on screen.
-            script::Event::Mode { call, key, value } => match &mut script.busy {
-                Busy::Running(pending) if pending.id == call => {
-                    pending.menu.set(&key, value);
-                }
-                _ if script.visible == Some(call) => {
+            script::Event::Mode { call, key, value } => {
+                if let Some(incoming) = script.session.pending_mut(call) {
+                    incoming.menu.set(&key, value);
+                } else if script.session.is_visible(call) {
                     self.menu.set(&key, value);
                     if key == "no-filter" {
                         self.apply_filter();
@@ -1010,8 +974,7 @@ impl App {
                     self.option_changed(&key);
                     self.redraw();
                 }
-                _ => {}
-            },
+            }
             script::Event::Completions { generation, items } => {
                 let completions = &mut self.completions;
                 if generation == completions.generation {
@@ -1031,33 +994,28 @@ impl App {
                 }
             }
             script::Event::FirstRow { call } => {
-                let held = match &mut script.busy {
-                    Busy::Running(pending) if pending.id == call => {
-                        pending.held = pending.menu.new_selection.is_some();
-                        pending.held
+                let wants_row = |incoming: &Incoming| incoming.menu.new_selection.is_some();
+                match script.session.first_row(call, wants_row) {
+                    FirstRow::Show(shown) => self.show(shown),
+                    FirstRow::Hold => {
+                        let timer = Timer::from_duration(HOLD);
+                        let _ = self.loop_handle.insert_source(timer, move |_, _, app| {
+                            let held = app.script.as_mut();
+                            if let Some(shown) = held.and_then(|s| s.session.hold_expired(call)) {
+                                app.show(shown);
+                            }
+                            TimeoutAction::Drop
+                        });
+                        // The row may have come in with the first one.
+                        self.release();
                     }
-                    _ => false,
-                };
-                if held {
-                    let timer = Timer::from_duration(HOLD);
-                    let _ = self.loop_handle.insert_source(timer, move |_, _, app| {
-                        app.release(Some(call));
-                        TimeoutAction::Drop
-                    });
-                    self.release(None);
-                } else if let Some(pending) = script.take_running(call) {
-                    self.show(pending);
+                    FirstRow::Stale => {}
                 }
             }
             script::Event::Done { call, status, rows } => {
                 let path = script.path().display().to_string();
-                match script.take_running(call) {
-                    // A mode with nothing to list still gets its screen,
-                    // and a held menu has every row it is going to get.
-                    Some(pending) if pending.is_switch() || pending.held => self.show(pending),
-                    // Rows would have shown the menu already, so this call
-                    // printed nothing: the script is done.
-                    Some(_) => {
+                let on_screen = match script.session.done(call) {
+                    Done::Ended => {
                         debug_assert_eq!(rows, 0);
                         self.outcome = Some(if status.success() {
                             Outcome::Quit
@@ -1066,13 +1024,17 @@ impl App {
                         });
                         return;
                     }
-                    None => {}
-                }
+                    Done::Show(shown) => {
+                        self.show(shown);
+                        true
+                    }
+                    Done::Complete => true,
+                    Done::Stale => false,
+                };
                 if !status.success() {
                     eprintln!("sieb: {path} exited with {status}");
                 }
-                let visible = self.script.as_ref().and_then(|script| script.visible);
-                if visible == Some(call) && self.picker.waiting() {
+                if on_screen && self.picker.waiting() {
                     // No more rows are coming, but the last may not be
                     // ranked yet: a rank past the end takes the last row.
                     self.matcher.settle(Duration::from_millis(50));
@@ -1084,29 +1046,11 @@ impl App {
         }
     }
 
-    /// Shows a held menu once the row it wants selected is in. `overdue`
-    /// is the call whose [`HOLD`] ran out, which is shown as it is.
-    fn release(&mut self, overdue: Option<u32>) {
-        let Some(script) = &mut self.script else {
-            return;
-        };
-        let Busy::Running(pending) = &mut script.busy else {
-            return;
-        };
-        if !pending.held {
-            return;
-        }
-        let ready = match overdue {
-            Some(call) => call == pending.id,
-            None => {
-                pending.matcher.tick(0);
-                let rows = pending.matcher.counts().1;
-                pending.menu.new_selection.is_none_or(|rank| rank < rows)
-            }
-        };
-        let id = pending.id;
-        if ready && let Some(pending) = script.take_running(id) {
-            self.show(pending);
+    /// Shows a held menu once the row it wants selected is in.
+    fn release(&mut self) {
+        let held = self.script.as_mut();
+        if let Some(shown) = held.and_then(|s| s.session.rows(Incoming::has_wanted_row)) {
+            self.show(shown);
         }
     }
 
@@ -1196,14 +1140,17 @@ impl App {
     /// [`OPEN_AFTER`] ran out: the panel opens on whatever is there. A menu
     /// held for its selection is left to show itself, within [`HOLD`].
     fn open(&mut self) {
-        let held = self
-            .script
-            .as_ref()
-            .is_some_and(|script| matches!(&script.busy, Busy::Running(pending) if pending.held));
-        if self.opening && !held {
-            self.opening = false;
+        let script = self.script.as_mut();
+        if script.is_some_and(|script| script.session.open_expired()) {
             self.redraw();
         }
+    }
+
+    /// A script's first menu is still on its way: the backdrop is up and
+    /// the panel is not.
+    fn opening(&self) -> bool {
+        let script = self.script.as_ref();
+        script.is_some_and(|script| script.session.opening())
     }
 
     /// Draws the panel, unless it still waits for the first menu, and
@@ -1213,7 +1160,7 @@ impl App {
             return;
         };
         self.dirty = false;
-        if !self.opening {
+        if !self.opening() {
             self.draw_panel(width, height);
         }
 
@@ -1326,39 +1273,21 @@ impl App {
 
 impl ScriptState {
     /// Starts the next call. Its rows go into a fresh matcher that replaces
-    /// the visible one once the first row arrives.
-    /// Whatever was running or waiting is dropped: its late events no
-    /// longer match a call id.
+    /// the visible one when the session says so.
     fn start(&mut self, call: Call) -> Result<(), String> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let retv = call.retv;
         let matcher = Matcher::new(self.case, self.notify.clone());
+        let injector = matcher.injector();
+        let incoming = Incoming {
+            matcher,
+            menu: Menu::default(),
+        };
+        let id = self.session.begin(call.retv, incoming);
         let events = self.events.clone();
         let send = move |event| {
             let _ = events.send(Event::Script(event));
         };
-        script::spawn(self.path(), call, id, matcher.injector(), send)
-            .map_err(|err| format!("{}: {err}", self.path().display()))?;
-        self.busy = Busy::Running(Box::new(Pending {
-            id,
-            matcher,
-            menu: Menu::default(),
-            retv,
-            held: false,
-        }));
-        Ok(())
-    }
-
-    /// The running call `id`, which is done waiting.
-    fn take_running(&mut self, id: u32) -> Option<Pending> {
-        match std::mem::replace(&mut self.busy, Busy::Idle) {
-            Busy::Running(pending) if pending.id == id => Some(*pending),
-            other => {
-                self.busy = other;
-                None
-            }
-        }
+        script::spawn(self.path(), call, id, injector, send)
+            .map_err(|err| format!("{}: {err}", self.path().display()))
     }
 
     fn path(&self) -> &Path {
@@ -1409,12 +1338,7 @@ impl ActivationHandler for App {
         let Some(script) = &mut self.script else {
             return;
         };
-        // A mode switch in the meantime has dropped the call and started
-        // its own, which must stay as it is.
-        if !matches!(script.busy, Busy::AwaitingToken(_)) {
-            return;
-        }
-        if let Busy::AwaitingToken(call) = std::mem::replace(&mut script.busy, Busy::Idle) {
+        if let Some(call) = script.session.take_awaiting() {
             self.start(Call {
                 token: Some(token),
                 ..call
