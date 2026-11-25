@@ -48,6 +48,8 @@ menu options are `prompt`, `message`, `data`, `no-custom`, `keep-filter`,
 `no-filter`, `complete`, `new-selection`, `markup-rows` and
 `custom-keys`.
 
+A `message` too wide for the panel wraps, onto four lines at most.
+
 `new-selection` counts rows from 0 and can come anywhere in the output.
 Rows are shown as they arrive, so the selection moves once that row is
 in, and to the last row if the script ends before it. Moving or typing

@@ -98,8 +98,9 @@ impl Default for Theme {
 /// Everything one frame shows, in logical terms.
 pub struct View<'a> {
     pub prompt: Option<&'a str>,
-    pub message: Option<&'a str>,
-    /// A byte range of `message` drawn bold: the completion Tab puts in.
+    /// The message box's lines, none for no box.
+    pub message: Vec<&'a str>,
+    /// A byte range of the first line drawn bold: the completion Tab puts in.
     pub message_mark: Option<Range<usize>>,
     pub query: &'a str,
     /// Draw the caret behind the query: off where nothing can be typed.
@@ -272,7 +273,7 @@ pub fn panel(
                 c.separator,
             );
         }
-        if view.message.is_some() {
+        if !view.message.is_empty() {
             let background = c.message_background;
             fill(
                 left,
@@ -388,9 +389,9 @@ pub fn panel(
         text.draw(&mut canvas, query_left - shift, y, size, query_clip, query);
     }
 
-    if let Some(message) = view.message {
+    for (i, message) in view.message.iter().enumerate() {
         let x = left + s(layout.message_padding);
-        let y = text_top(message_top, message_height);
+        let y = message_top + s(layout.message_padding) + i as f32 * line;
         let clip = Clip {
             ellipsis: true,
             ..clip(left, right - s(layout.message_padding))
@@ -398,7 +399,7 @@ pub fn panel(
         let mark = view
             .message_mark
             .clone()
-            .filter(|mark| message.get(mark.clone()).is_some())
+            .filter(|mark| i == 0 && message.get(mark.clone()).is_some())
             .unwrap_or(0..0);
         let bold = Style {
             weight: 700,
@@ -651,7 +652,7 @@ mod tests {
             .collect();
         let view = View {
             prompt: Some("run"),
-            message: None,
+            message: vec![],
             message_mark: None,
             query: "swr",
             caret: true,

@@ -143,7 +143,7 @@ pub enum Outcome {
 #[derive(Default)]
 struct Menu {
     prompt: Option<String>,
-    /// A line of text above the list.
+    /// Text above the list, wrapped to the panel's width.
     message: Option<String>,
     /// Rank to select, once the row is there.
     new_selection: Option<u32>,
@@ -203,6 +203,30 @@ mod tests {
             assert!(known || ["sieb", "markup-rows"].contains(key), "{key}");
         }
     }
+
+    /// Wraps with every character one unit wide.
+    fn wrapped(message: Option<&str>, room: f32) -> Vec<String> {
+        Wrapped::new(message, room, |line| line.chars().count() as f32).lines
+    }
+
+    #[test]
+    fn message_wraps_into_its_box() {
+        assert!(wrapped(None, 10.0).is_empty());
+        assert_eq!(wrapped(Some(""), 10.0), [""]);
+        assert_eq!(wrapped(Some("fits"), 10.0), ["fits"]);
+        assert_eq!(
+            wrapped(Some("Enter: type  Alt+s: sync"), 12.0),
+            ["Enter: type", "Alt+s: sync"]
+        );
+    }
+
+    #[test]
+    fn message_keeps_what_is_past_its_last_line() {
+        let lines = wrapped(Some("a b c d e f"), 1.0);
+        assert_eq!(lines, ["a", "b", "c", "d e f"]);
+        // Its spacing stays, on the lines that are not cut.
+        assert_eq!(wrapped(Some("a: b    c: d"), 12.0), ["a: b    c: d"]);
+    }
 }
 
 /// The menu of a call that is not shown yet: the rows printed so far and
@@ -229,19 +253,53 @@ const DOT: &str = "\u{2022}";
 /// the keyboard, so the password is not typed blind into it.
 const NO_FOCUS: &str = "no keyboard: typing goes elsewhere";
 
-/// The message box's text: completions while there are any, so they show
+/// The message box's lines: completions while there are any, so they show
 /// where the script's own words would be, else the script's. With
 /// completions, also the span of the one Tab puts in next. Fields rather
 /// than the app, so drawing can hold it while the matcher lends out rows.
 fn message<'a>(
-    menu: &'a Menu,
+    wrapped: &'a Wrapped,
     completions: &'a Completions,
-) -> (Option<&'a str>, Option<std::ops::Range<usize>>) {
+) -> (Vec<&'a str>, Option<std::ops::Range<usize>>) {
     if completions.items.is_empty() {
-        (menu.message.as_deref(), None)
+        (wrapped.lines.iter().map(String::as_str).collect(), None)
     } else {
         let next = completions.marks.get(completions.next).cloned();
-        (Some(&completions.labels), next)
+        (vec![&completions.labels], next)
+    }
+}
+
+/// The most lines a message box grows to. What is left over stays on the
+/// last one, which ends in an ellipsis.
+const MESSAGE_LINES: usize = 4;
+
+/// A menu's message as its box shows it, kept so it is wrapped once
+/// rather than with every frame.
+#[derive(Default)]
+struct Wrapped {
+    /// The message the lines were made from.
+    from: Option<String>,
+    lines: Vec<String>,
+}
+
+impl Wrapped {
+    /// `message` in lines no wider than `room` as `measure` sees them.
+    fn new(message: Option<&str>, room: f32, measure: impl FnMut(&str) -> f32) -> Self {
+        let mut lines = message.map_or_else(Vec::new, |message| {
+            crate::text::wrap_spaced(message, room, measure)
+        });
+        if lines.len() > MESSAGE_LINES {
+            let rest = lines.split_off(MESSAGE_LINES - 1).join(" ");
+            lines.push(rest);
+        }
+        // An empty message still has its box.
+        if message.is_some() && lines.is_empty() {
+            lines.push(String::new());
+        }
+        Self {
+            from: message.map(str::to_owned),
+            lines,
+        }
     }
 }
 
@@ -516,6 +574,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         notice,
         warned: Vec::new(),
         menu,
+        wrapped: Wrapped::default(),
         print,
         wheel: Wheel::default(),
         hovered: None,
@@ -609,6 +668,8 @@ struct App {
     warned: Vec<String>,
     /// Options of the script menu on screen.
     menu: Menu,
+    /// Its message, in the lines of the frame on screen.
+    wrapped: Wrapped,
     /// dmenu mode: what a pick prints.
     print: Print,
     wheel: Wheel,
@@ -1284,10 +1345,11 @@ impl App {
     /// The layout of the frame on screen. Drawing and hit-testing both use
     /// it, so a click always lands where the last frame put things.
     fn layout(&self) -> Layout {
+        let theme = self.options.layout;
         let layout = Layout {
-            message: self.menu.message.is_some(),
+            message: self.wrapped.lines.len() as u32,
             buttons: self.script.as_ref().map_or(0, |s| s.modes.len()),
-            ..self.options.layout
+            ..theme
         };
         // Completions come and go while typing; in a box of their own they
         // take list rows, so the panel does not jump with every keystroke.
@@ -1365,9 +1427,26 @@ impl App {
         self.layer.commit();
     }
 
+    /// Wraps the menu's message to the room its box has, when it is not
+    /// the one wrapped last.
+    fn wrap_message(&mut self) {
+        let message = self.menu.message.as_deref();
+        if self.wrapped.from.as_deref() == message {
+            return;
+        }
+        let layout = &self.options.layout;
+        let room = layout.width - 2.0 * (layout.padding + layout.message_padding);
+        let size = layout.font_size;
+        // Measured at scale 1. Glyphs at another scale may come out a hair
+        // wider, so the lines are kept a little short of the room.
+        let text = &mut self.text;
+        self.wrapped = Wrapped::new(message, room * 0.98, |line| text.width(size, line));
+    }
+
     /// Draws the panel into a fresh buffer and commits it on its
     /// subsurface, centered on an output of `width` by `height`.
     fn draw_panel(&mut self, width: u32, height: u32) {
+        self.wrap_message();
         let layout = self.layout();
         let (pw, ph) = layout.size();
         let (pw, ph) = (pw.min(width), ph.min(height));
@@ -1382,7 +1461,7 @@ impl App {
         // A notice's rows are text to read: none of them is marked.
         let selected = (matched > 0 && self.notice.is_none())
             .then(|| (self.picker.selected() - scroll) as usize);
-        let (message, message_mark) = message(&self.menu, &self.completions);
+        let (message, message_mark) = message(&self.wrapped, &self.completions);
         let rows = self.matcher.window(scroll, self.picker.lines());
         // Password mode draws a dot per character and never the secret, so
         // it stays out of shaping, glyph caches and the buffer alike.

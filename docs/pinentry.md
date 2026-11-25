@@ -15,8 +15,9 @@ It is tested against rbw. gpg-agent's password prompts work the same
 way, but its `CONFIRM` and `MESSAGE` dialogs are not implemented and
 answer as unknown commands.
 
-The panel shows the client's prompt and one line of text: the error from
-the last attempt if there is one, else the description. Typing shows as
+The panel shows the client's prompt and a message, wrapped to the panel's
+width: the error from the last attempt if there is one, else the
+description. Typing shows as
 dots. Enter submits, Escape, Ctrl+C, Ctrl+G or a click outside cancels,
 and Backspace, Ctrl+U, Ctrl+W and Ctrl+Backspace edit (the last three
 clear it all, since words mean nothing in hidden text).

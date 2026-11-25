@@ -387,7 +387,7 @@ impl Appearance {
             row_spacing: self.row_spacing.unwrap_or(d.row_spacing),
             message_padding: self.message_padding.unwrap_or(d.message_padding),
             lines: self.lines.unwrap_or(d.lines),
-            message: false,
+            message: 0,
             buttons: 0,
             slack: 0.0,
         };
