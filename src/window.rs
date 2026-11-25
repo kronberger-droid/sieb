@@ -959,7 +959,7 @@ impl App {
         self.picker.clamp(0);
         // A menu is shown on its first row, with the rest still on their
         // way, so the picker holds the rank until its row is in.
-        self.picker.want(self.menu.new_selection);
+        self.want_selection();
         self.apply_filter();
         // Completions belonged to the old menu, and the query may be new.
         self.schedule_completions();
@@ -1099,9 +1099,18 @@ impl App {
     /// An option that arrived with its menu already up.
     fn option_changed(&mut self, key: &str) {
         if key == "new-selection" {
-            self.picker.want(self.menu.new_selection);
+            self.want_selection();
             self.refresh();
         }
+    }
+
+    /// Hands the menu's `new-selection` to the picker. The rank counts the
+    /// menu's rows as printed, which a query has filtered and reordered:
+    /// with one typed, the best match stays selected instead.
+    fn want_selection(&mut self) {
+        let reordered = !self.menu.no_filter && !self.picker.query().is_empty();
+        self.picker
+            .want(self.menu.new_selection.filter(|_| !reordered));
     }
 
     fn move_by(&mut self, delta: i64, count: u32) {
