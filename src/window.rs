@@ -776,7 +776,9 @@ impl App {
             Keysym::BackSpace => self.edit(Picker::backspace),
             _ if is(Keysym::w, Keysym::W) => self.edit(Picker::delete_word),
             _ if is(Keysym::u, Keysym::U) => self.edit(Picker::clear),
-            _ if !ctrl && !self.modifiers.alt => {
+            // A key held with Ctrl, Alt or Super is a shortcut, bound or
+            // not, and never text.
+            _ if !ctrl && !self.modifiers.alt && !self.modifiers.logo => {
                 if let Some(text) = &event.utf8
                     && self.picker.insert(text)
                 {
@@ -791,7 +793,8 @@ impl App {
     /// Nothing moves, since there is nothing to move through.
     fn secret_key(&mut self, event: KeyEvent) {
         let ctrl = self.modifiers.ctrl;
-        let alt = self.modifiers.alt;
+        // Held with any of these, a key is a shortcut and never text.
+        let shortcut = ctrl || self.modifiers.alt || self.modifiers.logo;
         let Some(secret) = &mut self.secret else {
             return;
         };
@@ -817,7 +820,7 @@ impl App {
             Keysym::BackSpace => secret.backspace(),
             // `utf8` is sctk's own String, which we cannot wipe. See
             // `secret` for what that leaves.
-            _ if !ctrl && !alt => event
+            _ if !shortcut => event
                 .utf8
                 .as_deref()
                 .is_some_and(|text| secret.insert(text)),
