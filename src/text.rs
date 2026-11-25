@@ -46,7 +46,7 @@ impl Text {
         let fc = Fontconfig::new().ok_or("cannot initialise fontconfig")?;
         let mut pattern = Pattern::new(&fc)?;
         pattern.add_string(c"family", &CString::new(family)?)?;
-        let sorted = pattern.sort_fonts(UnicodeCoverage::Trim)?;
+        let sorted = pattern.sort_fonts(TRIM)?;
 
         // Faces are registered from fontconfig's metadata instead of being
         // parsed: the chain runs to hundreds of files, and opening each one
@@ -158,6 +158,14 @@ impl Text {
         width
     }
 }
+
+/// Has fontconfig drop the faces that add no characters to the ones sorted
+/// before them. fontconfig 0.11 hands its enum to `FcFontSort` as the
+/// `FcBool`, and `Trim` is the variant numbered 0, so it is `NoTrim` that
+/// trims: about 180 faces come back here instead of every one installed,
+/// over a thousand. cosmic-text opens the file of each face whose weight is
+/// not the one asked for, so the long list cost several ms per text style.
+const TRIM: UnicodeCoverage = UnicodeCoverage::NoTrim;
 
 /// Text with the color and style to draw it in.
 pub type Span<'s> = (&'s str, Color, markup::Style);
@@ -304,6 +312,13 @@ mod tests {
         assert_eq!(mul(255, 255), 255);
         assert_eq!(mul(0, 255), 0);
         assert_eq!(mul(128, 255), 128);
+    }
+
+    /// Fails once the fontconfig crate numbers its variants the way their
+    /// names read: `TRIM` then has to become `Trim`.
+    #[test]
+    fn trim_is_the_true_fcbool() {
+        assert_eq!(TRIM as i32, 1);
     }
 
     /// `cargo test -- --ignored --nocapture` prints the startup cost.
