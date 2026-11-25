@@ -13,6 +13,8 @@ use crate::text::{Canvas, Clip, Span, Text, mul};
 const MAX_GRAPHEMES: usize = 300;
 const CARET_WIDTH: f32 = 2.0;
 const SCROLLBAR_WIDTH: f32 = 5.0;
+/// Shown where the counter is while a script works.
+const BUSY: &str = "\u{2026}";
 
 pub const TRANSPARENT: [u8; 4] = [0; 4];
 
@@ -102,6 +104,8 @@ pub struct View<'a> {
     pub query: &'a str,
     /// Draw the caret behind the query: off where nothing can be typed.
     pub caret: bool,
+    /// A script is working on a pick or on the menu to come.
+    pub busy: bool,
     pub rows: Vec<RowView<'a>>,
     /// Index into `rows`.
     pub selected: Option<usize>,
@@ -169,9 +173,17 @@ pub fn panel(
     };
     let badge = pill(Some(theme.badge.as_str()), text);
     let prompt = pill(view.prompt, text);
-    let counter = theme
-        .counter
-        .then(|| format!("{}/{}", view.matched, view.total));
+    // While a script works, its mark takes the counter's place, also in a
+    // theme without a counter: the numbers on screen are of a menu on its
+    // way out.
+    let counter = if view.busy {
+        Some(BUSY.to_owned())
+    } else {
+        theme
+            .counter
+            .then(|| format!("{}/{}", view.matched, view.total))
+    };
+    let counter_color = if view.busy { c.accent } else { c.dim };
     let counter_width = counter.as_deref().map(|counter| text.width(size, counter));
     let query_left = x + input_padding;
     let query_right = match counter_width {
@@ -361,7 +373,7 @@ pub fn panel(
     }
     if let (Some(counter), Some(w)) = (&counter, counter_width) {
         let x = right - input_padding - w;
-        let spans = [plain(counter.as_str(), c.dim)];
+        let spans = [plain(counter.as_str(), counter_color)];
         text.draw(&mut canvas, x, y, size, clip(x, right), spans);
     }
 
@@ -643,6 +655,7 @@ mod tests {
             message_mark: None,
             query: "swr",
             caret: true,
+            busy: false,
             rows,
             selected: Some(2),
             scroll: 0,

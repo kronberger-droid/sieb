@@ -23,6 +23,9 @@ sieb takes the keyboard right away, and its panel opens once the first
 menu's first row is in, or empty after 150ms when the script takes longer.
 What is typed in the meantime goes into the query.
 
+A call that takes longer than 150ms shows as an ellipsis where the
+counter is, until its menu is up. Enter does nothing while it runs.
+
 A script that starts a long-running program has to detach its output,
 since sieb waits for the script's stdout to close.
 

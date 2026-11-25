@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Child;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::{
     activation::{ActivationHandler, ActivationState, RequestData},
@@ -252,6 +252,10 @@ const HOLD: Duration = Duration::from_millis(150);
 /// typed is lost; past this, an empty panel says sieb is there.
 const OPEN_AFTER: Duration = Duration::from_millis(150);
 
+/// How long a script may work before the panel marks it. Most answer well
+/// inside this, and a mark that flashes with every pick is worse than none.
+const BUSY_AFTER: Duration = Duration::from_millis(150);
+
 /// The most rows a notice shows at once. A longer one scrolls.
 const NOTICE_LINES: u32 = 12;
 
@@ -308,6 +312,8 @@ struct ScriptState {
     session: Session<Incoming>,
     /// The call started last, stopped when the next one replaces it.
     running: Option<script::Running>,
+    /// When the script side last went from idle to having work.
+    since: Instant,
 }
 
 /// Wakes the event loop when the matcher has new results.
@@ -387,6 +393,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
                 notify: wake.notify.clone(),
                 session: Session::default(),
                 running: None,
+                since: Instant::now(),
             };
             // No token: the first menu launches nothing. A script that
             // cannot start is the caller's to report, like one that fails.
@@ -979,6 +986,12 @@ impl App {
         };
         // Any call may launch something, and only the script knows which.
         // The token comes back in `new_token`, which then starts the call.
+        if self.activation.is_some() && self.seat.is_some() {
+            self.expect_work();
+        }
+        let Some(script) = &mut self.script else {
+            return;
+        };
         if let (Some(activation), Some(seat)) = (&self.activation, &self.seat) {
             script.session.await_token(call);
             activation.request_token(
@@ -995,8 +1008,38 @@ impl App {
         }
     }
 
+    /// The script side is about to get something to do. If it is still at
+    /// it after [`BUSY_AFTER`], the panel says so; a script that answers
+    /// faster never shows the mark.
+    fn expect_work(&mut self) {
+        let Some(script) = &mut self.script else {
+            return;
+        };
+        // Already at work: the time it started is what counts.
+        if !script.session.idle() {
+            return;
+        }
+        script.since = Instant::now();
+        let timer = Timer::from_duration(BUSY_AFTER);
+        let _ = self.loop_handle.insert_source(timer, |_, _, app| {
+            if app.busy() {
+                app.redraw();
+            }
+            TimeoutAction::Drop
+        });
+    }
+
+    /// A script has been working for long enough to say so: on a pick,
+    /// which drops further Enters meanwhile, or on a menu that is slow to
+    /// come.
+    fn busy(&self) -> bool {
+        let script = self.script.as_ref();
+        script.is_some_and(|s| !s.session.idle() && s.since.elapsed() >= BUSY_AFTER)
+    }
+
     /// Runs `call`, or ends sieb with the reason it could not.
     fn start(&mut self, call: Call) {
+        self.expect_work();
         if let Some(script) = &mut self.script
             && let Err(err) = script.start(call)
         {
@@ -1320,6 +1363,7 @@ impl App {
         let (matched, total) = self.matcher.counts();
         self.picker.fit(layout.lines, matched);
         let scroll = self.picker.scroll();
+        let busy = self.busy();
         // A notice's rows are text to read: none of them is marked.
         let selected = (matched > 0 && self.notice.is_none())
             .then(|| (self.picker.selected() - scroll) as usize);
@@ -1352,6 +1396,7 @@ impl App {
                 .or(self.notice.as_deref())
                 .unwrap_or(self.picker.query()),
             caret: self.notice.is_none(),
+            busy,
             rows: rows
                 .into_iter()
                 .map(|(entry, indices)| render::RowView {
