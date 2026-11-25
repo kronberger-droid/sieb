@@ -118,11 +118,12 @@
           (toolchainFor pkgs)
           pkgs.pkg-config
           # For trying sieb without a desktop session: sway runs headless
-          # (`WLR_BACKENDS=headless`), wtype sends keys and grim takes
-          # screenshots.
+          # (`WLR_BACKENDS=headless`), wtype sends keys, grim takes
+          # screenshots and wl-copy fills the clipboard to paste from.
           pkgs.sway
           pkgs.wtype
           pkgs.grim
+          pkgs.wl-clipboard
         ];
         buildInputs = nativeDepsFor pkgs;
       };
