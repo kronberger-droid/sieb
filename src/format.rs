@@ -216,6 +216,24 @@ pub(crate) const MENU_OPTIONS: &[&str] = &[
     "custom-keys",
 ];
 
+/// Menu options rofi has and sieb does not act on. A script may set them
+/// without a word from sieb, since rofi scripts are meant to run as they
+/// are.
+const ROFI_ONLY: &[&str] = &[
+    "urgent",
+    "active",
+    "delim",
+    "use-hot-keys",
+    "keep-selection",
+    "theme",
+];
+
+/// Whether `key` is a menu option of sieb's or of rofi's. Anything else a
+/// script sets is most likely a typo.
+pub(crate) fn is_menu_option(key: &str) -> bool {
+    MENU_OPTIONS.contains(&key) || ROFI_ONLY.contains(&key)
+}
+
 /// An object with `text` is a row; one made of option keys sets menu
 /// options; a bare string or number is a row of just that.
 ///
@@ -319,6 +337,14 @@ mod tests {
             parse_rofi("\0prompt\x1fPower"),
             Line::Mode("prompt".into(), "Power".into())
         );
+    }
+
+    #[test]
+    fn menu_options_of_sieb_and_rofi_are_known() {
+        assert!(is_menu_option("prompt") && is_menu_option("custom-keys"));
+        // rofi's own, which sieb ignores.
+        assert!(is_menu_option("urgent") && is_menu_option("theme"));
+        assert!(!is_menu_option("promt") && !is_menu_option("info"));
     }
 
     #[test]

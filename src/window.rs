@@ -500,6 +500,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         script,
         secret,
         notice,
+        warned: Vec::new(),
         menu,
         print,
         wheel: Wheel::default(),
@@ -590,6 +591,8 @@ struct App {
     secret: Option<Secret>,
     /// A notice's title, in place of the query: see [`Input::Notice`].
     notice: Option<String>,
+    /// Menu options a script set that nobody knows, already reported.
+    warned: Vec<String>,
     /// Options of the script menu on screen.
     menu: Menu,
     /// dmenu mode: what a pick prints.
@@ -1071,6 +1074,11 @@ impl App {
         match event {
             // Options for the call on its way in, or the one on screen.
             script::Event::Mode { call, key, value } => {
+                // Once per key: a script prints its options with every menu.
+                if !format::is_menu_option(&key) && !self.warned.contains(&key) {
+                    eprintln!("sieb: unknown menu option {key:?}");
+                    self.warned.push(key.clone());
+                }
                 if let Some(incoming) = script.session.pending_mut(call) {
                     incoming.menu.set(&key, value);
                 } else if script.session.is_visible(call) {
