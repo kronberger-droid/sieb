@@ -729,6 +729,21 @@ impl App {
         self.redraw();
     }
 
+    /// A key held down, repeating. Everything repeats but what answers a
+    /// menu: held a moment too long, Enter would go on to answer the menu
+    /// its first press brought up, "yes" in a confirmation, and a password
+    /// prompt that comes back after a wrong try would be sent empty.
+    fn repeat(&mut self, event: KeyEvent) {
+        let custom = &self.menu.custom_keys;
+        let answers = matches!(event.keysym, Keysym::Return | Keysym::KP_Enter)
+            || custom
+                .iter()
+                .any(|binding| binding.matches(event.keysym, &self.modifiers));
+        if !answers {
+            self.key(event);
+        }
+    }
+
     fn key(&mut self, event: KeyEvent) {
         // Keys after Enter in the same batch would otherwise reach the
         // dmenu path below, which in password mode means drawing them as
@@ -1521,7 +1536,7 @@ impl SeatHandler for App {
                     &seat,
                     None,
                     self.loop_handle.clone(),
-                    Box::new(|app, _, event| app.key(event)),
+                    Box::new(|app, _, event| app.repeat(event)),
                 )
                 .ok();
         }
@@ -1607,7 +1622,7 @@ impl KeyboardHandler for App {
         _: u32,
         event: KeyEvent,
     ) {
-        self.key(event);
+        self.repeat(event);
     }
 
     fn release_key(
