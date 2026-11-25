@@ -347,8 +347,14 @@ pub fn wake() -> io::Result<Wake> {
 }
 
 pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Box<dyn Error>> {
-    // Input starts streaming before anything else, so it arrives while
-    // fonts load and the window maps.
+    // fontconfig is what the first frame waits for longest, and it needs
+    // nothing from the compositor: it starts first and runs alongside
+    // everything up to the first configure.
+    let font = options.font.clone();
+    let text = std::thread::spawn(move || Text::load(&font).map_err(|err| err.to_string()));
+
+    // Input starts streaming right after, so it arrives while fonts load
+    // and the window maps.
     let (events, event_channel) = channel::channel();
     let mut script = None;
     let mut secret = None;
@@ -402,11 +408,6 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
             Matcher::new(options.case, wake.notify.clone())
         }
     };
-    // fontconfig takes a while and needs nothing from the compositor, so
-    // it runs alongside the connection and the first roundtrips.
-    let font = options.font.clone();
-    let text = std::thread::spawn(move || Text::load(&font).map_err(|err| err.to_string()));
-
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
