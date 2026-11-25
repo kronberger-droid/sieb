@@ -822,6 +822,14 @@ impl App {
             Keysym::Tab if ctrl => self.cycle_mode(1),
             Keysym::Left | Keysym::KP_Left if self.modifiers.shift => self.cycle_mode(-1),
             Keysym::Right | Keysym::KP_Right if self.modifiers.shift => self.cycle_mode(1),
+            // The cursor in the query, with a shell's keys for its ends.
+            Keysym::Left | Keysym::KP_Left => self.move_cursor(Picker::left),
+            Keysym::Right | Keysym::KP_Right => self.move_cursor(Picker::right),
+            Keysym::Home | Keysym::KP_Home => self.move_cursor(Picker::home),
+            Keysym::End | Keysym::KP_End => self.move_cursor(Picker::end),
+            _ if is(Keysym::a, Keysym::A) => self.move_cursor(Picker::home),
+            _ if is(Keysym::e, Keysym::E) => self.move_cursor(Picker::end),
+            Keysym::Delete | Keysym::KP_Delete => self.edit(Picker::delete),
             Keysym::Tab if self.next_completion() => {}
             Keysym::Up | Keysym::KP_Up | Keysym::ISO_Left_Tab => self.move_by(-1, count),
             Keysym::Down | Keysym::KP_Down | Keysym::Tab => self.move_by(1, count),
@@ -1256,6 +1264,14 @@ impl App {
         self.redraw();
     }
 
+    /// Moves the cursor in the query, which changes neither the query nor
+    /// what it matches.
+    fn move_cursor(&mut self, f: fn(&mut Picker) -> bool) {
+        if f(&mut self.picker) {
+            self.redraw();
+        }
+    }
+
     fn edit(&mut self, f: fn(&mut Picker) -> bool) {
         if f(&mut self.picker) {
             self.query_changed();
@@ -1393,6 +1409,8 @@ impl App {
                 NO_FOCUS.to_owned()
             }
         });
+        // What stands where the query would be, in a mode without one.
+        let shown = dots.as_deref().or(self.notice.as_deref());
         let view = View {
             // As in rofi, a mode's name is its prompt unless it sets one.
             prompt: self
@@ -1406,10 +1424,9 @@ impl App {
                     .map(|s| s.modes[s.active].label.as_str())),
             message,
             message_mark,
-            query: dots
-                .as_deref()
-                .or(self.notice.as_deref())
-                .unwrap_or(self.picker.query()),
+            query: shown.unwrap_or(self.picker.query()),
+            // The dots of a password have their cursor at the end.
+            cursor: shown.map_or(self.picker.cursor(), str::len),
             caret: self.notice.is_none(),
             busy,
             rows: rows

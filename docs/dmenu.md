@@ -79,6 +79,9 @@ included. Typed text prints as `{"text": ...}`, or under `FIELD` with
 | Up, Down, Tab, Shift+Tab | move |
 | Ctrl+P, Ctrl+K / Ctrl+N, Ctrl+J | move up / down |
 | Page Up, Page Down | move a page |
+| Left, Right | move the cursor in the query |
+| Home, End, Ctrl+A, Ctrl+E | move it to the start / end |
+| Backspace, Delete | delete before / after the cursor |
 | Ctrl+W, Ctrl+Backspace | delete a word |
 | Ctrl+U | clear the query |
 | Ctrl+Tab, Shift+Right / Ctrl+Shift+Tab, Shift+Left | next / previous [mode](scripts.md#modes) |

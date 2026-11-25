@@ -13,6 +13,9 @@ pub enum Accept {
 
 pub struct Picker {
     query: String,
+    /// Where typing goes: a byte offset into `query`, always between two
+    /// graphemes.
+    cursor: usize,
     selected: u32,
     scroll: u32,
     lines: u32,
@@ -25,6 +28,7 @@ impl Picker {
     pub fn new(lines: u32) -> Self {
         Self {
             query: String::new(),
+            cursor: 0,
             selected: 0,
             scroll: 0,
             lines: lines.max(1),
@@ -50,20 +54,36 @@ impl Picker {
         self.scroll
     }
 
-    /// Returns whether the query changed.
-    pub fn insert(&mut self, text: &str) -> bool {
-        let before = self.query.len();
-        self.query.extend(text.chars().filter(|c| !c.is_control()));
-        self.edited(before != self.query.len())
+    /// Byte offset of the cursor in the query.
+    pub fn cursor(&self) -> usize {
+        self.cursor
     }
 
-    /// Deletes the last grapheme, so an accent typed as a combining
-    /// character goes together with its letter.
+    /// Puts `text` in at the cursor. Returns whether the query changed.
+    pub fn insert(&mut self, text: &str) -> bool {
+        let typed: String = text.chars().filter(|c| !c.is_control()).collect();
+        self.query.insert_str(self.cursor, &typed);
+        self.cursor += typed.len();
+        self.edited(!typed.is_empty())
+    }
+
+    /// Deletes the grapheme before the cursor, so an accent typed as a
+    /// combining character goes together with its letter.
     pub fn backspace(&mut self) -> bool {
-        let Some((start, _)) = self.query.grapheme_indices(true).next_back() else {
+        let Some(start) = self.before() else {
             return false;
         };
-        self.query.truncate(start);
+        self.query.replace_range(start..self.cursor, "");
+        self.cursor = start;
+        self.edited(true)
+    }
+
+    /// Delete: the grapheme after the cursor.
+    pub fn delete(&mut self) -> bool {
+        let Some(end) = self.after() else {
+            return false;
+        };
+        self.query.replace_range(self.cursor..end, "");
         self.edited(true)
     }
 
@@ -71,18 +91,62 @@ impl Picker {
     pub fn clear(&mut self) -> bool {
         let changed = !self.query.is_empty();
         self.query.clear();
+        self.cursor = 0;
         self.edited(changed)
     }
 
-    /// Ctrl+W: delete back to the previous whitespace, like a shell.
+    /// Ctrl+W: delete back from the cursor to the previous whitespace,
+    /// like a shell.
     pub fn delete_word(&mut self) -> bool {
-        let trimmed = self.query.trim_end().len();
-        let start = self.query[..trimmed]
+        let before = &self.query[..self.cursor];
+        let trimmed = before.trim_end().len();
+        let start = before[..trimmed]
             .rfind(char::is_whitespace)
             .map_or(0, |i| i + 1);
-        let changed = start != self.query.len();
-        self.query.truncate(start);
+        let changed = start != self.cursor;
+        self.query.replace_range(start..self.cursor, "");
+        self.cursor = start;
         self.edited(changed)
+    }
+
+    /// Moves the cursor one grapheme left. Returns whether it moved, as
+    /// the other cursor moves do: the query and the selection stay.
+    pub fn left(&mut self) -> bool {
+        let start = self.before();
+        self.cursor = start.unwrap_or(self.cursor);
+        start.is_some()
+    }
+
+    pub fn right(&mut self) -> bool {
+        let end = self.after();
+        self.cursor = end.unwrap_or(self.cursor);
+        end.is_some()
+    }
+
+    pub fn home(&mut self) -> bool {
+        let moved = self.cursor != 0;
+        self.cursor = 0;
+        moved
+    }
+
+    pub fn end(&mut self) -> bool {
+        let moved = self.cursor != self.query.len();
+        self.cursor = self.query.len();
+        moved
+    }
+
+    /// Where the grapheme before the cursor starts, if there is one.
+    fn before(&self) -> Option<usize> {
+        let (start, _) = self.query[..self.cursor]
+            .grapheme_indices(true)
+            .next_back()?;
+        Some(start)
+    }
+
+    /// Where the grapheme after the cursor ends, if there is one.
+    fn after(&self) -> Option<usize> {
+        let next = self.query[self.cursor..].graphemes(true).next()?;
+        Some(self.cursor + next.len())
     }
 
     fn edited(&mut self, changed: bool) -> bool {
@@ -270,6 +334,57 @@ mod tests {
         picker.delete_word();
         assert_eq!(picker.query(), "");
         assert!(!picker.delete_word());
+    }
+
+    #[test]
+    fn typing_and_deleting_happen_at_the_cursor() {
+        let mut picker = typed("helo");
+        assert!(picker.left());
+        picker.insert("l");
+        assert_eq!((picker.query(), picker.cursor()), ("hello", 4));
+        assert!(picker.backspace());
+        assert_eq!((picker.query(), picker.cursor()), ("helo", 3));
+        assert!(picker.delete());
+        assert_eq!((picker.query(), picker.cursor()), ("hel", 3));
+        // Nothing after the end, nothing before the start.
+        assert!(!picker.delete());
+        assert!(picker.home());
+        assert!(!picker.backspace() && !picker.left() && !picker.home());
+        assert!(picker.end());
+        assert!(!picker.right() && !picker.end());
+    }
+
+    #[test]
+    fn cursor_moves_by_whole_graphemes() {
+        let mut picker = typed("cafe\u{301}!");
+        picker.left();
+        picker.left();
+        assert_eq!(picker.cursor(), 3);
+        assert!(picker.delete());
+        assert_eq!(picker.query(), "caf!");
+        picker.right();
+        assert_eq!(picker.cursor(), 4);
+    }
+
+    #[test]
+    fn delete_word_stops_at_the_cursor() {
+        let mut picker = typed("open the door");
+        for _ in 0..5 {
+            picker.left();
+        }
+        assert!(picker.delete_word());
+        assert_eq!((picker.query(), picker.cursor()), ("open  door", 5));
+    }
+
+    #[test]
+    fn moving_the_cursor_keeps_the_selection() {
+        let mut picker = typed("ab");
+        picker.move_by(3, 10);
+        picker.left();
+        picker.home();
+        assert_eq!(picker.selected(), 3);
+        picker.clear();
+        assert_eq!(picker.cursor(), 0);
     }
 
     #[test]

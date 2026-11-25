@@ -102,7 +102,9 @@ pub struct View<'a> {
     /// A byte range of `message` drawn bold: the completion Tab puts in.
     pub message_mark: Option<Range<usize>>,
     pub query: &'a str,
-    /// Draw the caret behind the query: off where nothing can be typed.
+    /// Byte offset of the cursor in `query`, where the caret is drawn.
+    pub cursor: usize,
+    /// Draw the caret: off where nothing can be typed.
     pub caret: bool,
     /// A script is working on a pick or on the menu to come.
     pub busy: bool,
@@ -190,13 +192,14 @@ pub fn panel(
         Some(w) => right - input_padding - w - gap,
         None => right - input_padding,
     };
-    // When the query is wider than the room left, it scrolls so its end,
-    // where typing happens, stays in view, and the caret with it.
+    // When the text up to the cursor is wider than the room left, the
+    // query scrolls so the cursor, where typing happens, stays in view.
     let caret_width = s(CARET_WIDTH);
     let room = query_right - query_left - caret_width - s(1.0);
-    let query_width = text.width(size, view.query);
-    let shift = (query_width - room).max(0.0);
-    let caret_x = (query_left - shift + query_width + s(1.0)).min(query_right - caret_width);
+    let typed = view.query.get(..view.cursor).unwrap_or(view.query);
+    let typed_width = text.width(size, typed);
+    let shift = (typed_width - room).max(0.0);
+    let caret_x = (query_left - shift + typed_width + s(1.0)).min(query_right - caret_width);
 
     let input_top = s(layout.input_top());
     let input_height = s(layout.input_height());
@@ -654,6 +657,7 @@ mod tests {
             message: None,
             message_mark: None,
             query: "swr",
+            cursor: 3,
             caret: true,
             busy: false,
             rows,
