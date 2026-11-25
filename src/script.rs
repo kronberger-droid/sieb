@@ -8,13 +8,16 @@
 //! A menu with the `complete` option is also asked, while the user types,
 //! for completions of the query: see [`complete`].
 
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use nucleo::Injector;
+use rustix::process::{Pid, Signal, kill_process};
 
 use crate::format::{self, Format, Line};
 use crate::matcher::{self, Entry};
@@ -137,6 +140,58 @@ pub struct Completion {
     pub query: String,
 }
 
+/// A call that was started, to stop it when another one takes its place.
+pub struct Running {
+    pid: Pid,
+    state: Arc<State>,
+}
+
+/// What a call's reader thread and its [`Running`] handle share.
+struct State {
+    /// The call is there to list rows: the first call of a mode, or any
+    /// call once it has printed one. A pick that has printed nothing may
+    /// be acting on it, and is never cut short.
+    listing: AtomicBool,
+    /// Asked to stop: the reader takes its next read for the end.
+    stopped: AtomicBool,
+    /// Set right before the reader waits for the script. Until then the
+    /// script has not been reaped and its pid cannot be anyone else's; the
+    /// lock keeps a signal from slipping in after.
+    reaping: Mutex<bool>,
+}
+
+impl Running {
+    /// Ends a call that is still listing rows nobody will see: a stream
+    /// like `fd` over a home directory would otherwise run to its end
+    /// behind the menu that replaced it. The script gets SIGTERM, and its
+    /// output is closed, which stops what it started at the next write.
+    pub fn stop(&self) {
+        if !self.state.listing.load(Ordering::Acquire) {
+            return;
+        }
+        self.state.stopped.store(true, Ordering::Release);
+        let reaping = self.state.reaping.lock().unwrap_or_else(|e| e.into_inner());
+        if !*reaping {
+            let _ = kill_process(self.pid, Signal::TERM);
+        }
+    }
+}
+
+/// Reads as ended once the call is stopped, whatever is still coming.
+struct Until<R> {
+    inner: R,
+    state: Arc<State>,
+}
+
+impl<R: Read> Read for Until<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.state.stopped.load(Ordering::Acquire) {
+            return Ok(0);
+        }
+        self.inner.read(buf)
+    }
+}
+
 /// Starts `script` and streams its rows into `injector` on a thread.
 ///
 /// Spawning happens here rather than on the thread, so a script that is
@@ -147,15 +202,29 @@ pub fn spawn(
     id: u32,
     injector: Injector<Entry>,
     send: impl Fn(Event) + Send + 'static,
-) -> io::Result<()> {
+) -> io::Result<Running> {
     let mut child = command(script, &call).spawn()?;
     let stdout = child.stdout.take().expect("stdout is piped");
+    let state = Arc::new(State {
+        listing: AtomicBool::new(call.retv == Retv::Initial),
+        stopped: AtomicBool::new(false),
+        reaping: Mutex::new(false),
+    });
+    let running = Running {
+        pid: Pid::from_child(&child),
+        state: state.clone(),
+    };
     thread::spawn(move || {
         let mut rows = 0;
+        let reader = Until {
+            inner: stdout,
+            state: state.clone(),
+        };
         // A read error ends the menu where it got to; the exit status
-        // below still tells the UI how the script fared.
+        // below still tells the UI how the script fared. The pipe closes
+        // with the reader, when this returns.
         let _ = format::feed(
-            BufReader::new(stdout),
+            BufReader::new(reader),
             Format::Rofi,
             None,
             |line| match line {
@@ -167,21 +236,26 @@ pub fn spawn(
                 Line::Row(row) => {
                     matcher::push(&injector, rows, row);
                     if rows == 0 {
+                        state.listing.store(true, Ordering::Release);
                         send(Event::FirstRow { call: id });
                     }
                     rows += 1;
                 }
             },
         );
+        *state.reaping.lock().unwrap_or_else(|e| e.into_inner()) = true;
         // Waiting reaps the child; a failed wait reads as a failed script.
         let status = child.wait().unwrap_or_else(|_| failed_status());
-        send(Event::Done {
-            call: id,
-            status,
-            rows,
-        });
+        // A stopped call ends on a signal, which is no failure to report.
+        if !state.stopped.load(Ordering::Acquire) {
+            send(Event::Done {
+                call: id,
+                status,
+                rows,
+            });
+        }
     });
-    Ok(())
+    Ok(running)
 }
 
 /// Asks `script` for completions of `call.query`, with `ROFI_RETV` 20.

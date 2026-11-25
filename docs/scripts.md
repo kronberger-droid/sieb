@@ -26,6 +26,11 @@ What is typed in the meantime goes into the query.
 A script that starts a long-running program has to detach its output,
 since sieb waits for the script's stdout to close.
 
+A call that is still printing rows when a pick or a mode switch replaces
+its menu is stopped: the script gets SIGTERM and its stdout is closed. A
+call that was picked and has printed nothing is left to finish, since it
+may be acting on the pick.
+
 ## Rows and options
 
 Rows and menu options use rofi's in-band syntax:

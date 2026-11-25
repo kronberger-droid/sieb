@@ -304,6 +304,8 @@ struct ScriptState {
     notify: Arc<dyn Fn() + Send + Sync>,
     /// Which call is on screen and which is on its way in.
     session: Session<Incoming>,
+    /// The call started last, stopped when the next one replaces it.
+    running: Option<script::Running>,
 }
 
 /// Wakes the event loop when the matcher has new results.
@@ -378,6 +380,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
                 case: options.case,
                 notify: wake.notify.clone(),
                 session: Session::default(),
+                running: None,
             };
             // No token: the first menu launches nothing. A script that
             // cannot start is the caller's to report, like one that fails.
@@ -1386,8 +1389,15 @@ impl ScriptState {
         let send = move |event| {
             let _ = events.send(Event::Script(event));
         };
-        script::spawn(self.path(), call, id, injector, send)
-            .map_err(|err| format!("{}: {err}", self.path().display()))
+        // The menu of the call before is on its way out, whatever it still
+        // has to print.
+        if let Some(replaced) = self.running.take() {
+            replaced.stop();
+        }
+        let running = script::spawn(self.path(), call, id, injector, send)
+            .map_err(|err| format!("{}: {err}", self.path().display()))?;
+        self.running = Some(running);
+        Ok(())
     }
 
     fn path(&self) -> &Path {
