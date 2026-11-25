@@ -167,7 +167,11 @@ fn register(db: &mut fontdb::Database, seen: &mut HashSet<(String, u32)>, font: 
     let (Ok(file), Ok(name)) = (font.filename(), font.get_string(c"family")) else {
         return;
     };
-    let index = font.face_index().unwrap_or(0) as u32;
+    // For a named instance of a variable font, fontconfig packs the
+    // instance into the upper 16 bits, and fontdb finds no face at that
+    // number. The instances share one face, which cosmic-text sets to the
+    // weight it needs, so the first one listed stands for all of them.
+    let index = font.face_index().unwrap_or(0) as u32 & 0xffff;
     if !seen.insert((file.to_owned(), index)) {
         return;
     }
@@ -318,13 +322,27 @@ mod tests {
         // Fallback has to reach fonts that are registered but never parsed.
         let start = std::time::Instant::now();
         let plain = markup::Style::default();
-        let buffer = text.shape(15.0, [("日本語 🦀 café", Color(0), plain)]);
-        let tofu = buffer
+        let sample = "日本語 🦀 café";
+        let buffer = text.shape(15.0, [(sample, Color(0), plain)]);
+        let tofu: Vec<_> = buffer
             .layout_runs()
             .flat_map(|run| run.glyphs)
             .filter(|glyph| glyph.glyph_id == 0)
-            .count();
+            .map(|glyph| &sample[glyph.start..glyph.end])
+            .collect();
         eprintln!("shaped CJK and emoji in {:?}", start.elapsed());
-        assert_eq!(tofu, 0, "glyphs fell back to .notdef");
+        assert!(tofu.is_empty(), "fell back to .notdef: {tofu:?}");
+
+        // Each new style ranks every face again.
+        for (name, weight, italic) in [("bold", 700, false), ("italic", 400, true)] {
+            let style = markup::Style {
+                weight,
+                italic,
+                ..plain
+            };
+            let start = std::time::Instant::now();
+            text.shape(15.0, [("style", Color(0), style)]);
+            eprintln!("first {name} shape in {:?}", start.elapsed());
+        }
     }
 }
