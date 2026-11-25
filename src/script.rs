@@ -8,13 +8,14 @@
 //! A menu with the `complete` option is also asked, while the user types,
 //! for completions of the query: see [`complete`].
 
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use nucleo::Injector;
 use rustix::process::{Pid, Signal, kill_process};
@@ -125,6 +126,9 @@ pub enum Event {
         call: u32,
         status: ExitStatus,
         rows: u32,
+        /// The end of what a failed first call of a mode wrote to stderr,
+        /// for telling the user why no menu came. Empty otherwise.
+        stderr: String,
     },
     /// What a [`complete`] call printed, for the query of `generation`.
     Completions {
@@ -203,8 +207,17 @@ pub fn spawn(
     injector: Injector<Entry>,
     send: impl Fn(Event) + Send + 'static,
 ) -> io::Result<Running> {
-    let mut child = command(script, &call).spawn()?;
+    let mut command = command(script, &call);
+    // Only for the call that lists a mode's first menu, where a failure
+    // leaves the user with nothing on screen to go by. A picked call may
+    // launch a program that inherits this pipe, and one that outlives sieb
+    // would be killed by its next line to a stderr nobody reads any more.
+    if call.retv == Retv::Initial {
+        command.stderr(Stdio::piped());
+    }
+    let mut child = command.spawn()?;
     let stdout = child.stdout.take().expect("stdout is piped");
+    let said = child.stderr.take().map(Said::listen);
     let state = Arc::new(State {
         listing: AtomicBool::new(call.retv == Retv::Initial),
         stopped: AtomicBool::new(false),
@@ -248,14 +261,94 @@ pub fn spawn(
         let status = child.wait().unwrap_or_else(|_| failed_status());
         // A stopped call ends on a signal, which is no failure to report.
         if !state.stopped.load(Ordering::Acquire) {
+            let stderr = match said {
+                Some(said) if !status.success() => said.end(),
+                _ => String::new(),
+            };
             send(Event::Done {
                 call: id,
                 status,
                 rows,
+                stderr,
             });
         }
     });
     Ok(running)
+}
+
+/// What a script writes to stderr, passed on to sieb's own as it comes, as
+/// if inherited, with the end of it kept.
+struct Said {
+    kept: Arc<Mutex<Vec<u8>>>,
+    /// Hangs up when the script's stderr closes.
+    closed: mpsc::Receiver<()>,
+}
+
+/// How much of a script's stderr is kept, counted from its end.
+const SAID_BYTES: usize = 4096;
+const SAID_LINES: usize = 10;
+
+impl Said {
+    fn listen(mut stderr: ChildStderr) -> Self {
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let (open, closed) = mpsc::channel();
+        let keep = kept.clone();
+        thread::spawn(move || {
+            let _open = open;
+            let mut buf = [0; 1024];
+            while let Ok(n) = stderr.read(&mut buf)
+                && n > 0
+            {
+                let _ = io::stderr().write_all(&buf[..n]);
+                let mut kept = keep.lock().unwrap_or_else(|e| e.into_inner());
+                kept.extend_from_slice(&buf[..n]);
+                let excess = kept.len().saturating_sub(SAID_BYTES);
+                kept.drain(..excess);
+            }
+        });
+        Self { kept, closed }
+    }
+
+    /// The last lines of it, once the script has exited. Its own writes
+    /// are in the pipe by then, but perhaps not read yet, so this waits a
+    /// moment for the pipe to close, and not longer: a program the script
+    /// left running may hold it open for good.
+    fn end(self) -> String {
+        let _ = self.closed.recv_timeout(Duration::from_millis(100));
+        let kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+        last_lines(&String::from_utf8_lossy(&kept), SAID_LINES)
+    }
+}
+
+/// The last `count` lines of `text` that have something on them, without
+/// the escape sequences a script may color its errors with.
+fn last_lines(text: &str, count: usize) -> String {
+    let plain = strip_escapes(text);
+    let lines: Vec<&str> = plain
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    lines[lines.len().saturating_sub(count)..].join("\n")
+}
+
+/// `text` without ANSI escape sequences: `ESC [`, parameters, one letter.
+fn strip_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            out.push(ch);
+        } else if chars.next() == Some('[') {
+            // Up to and including the final byte, a letter or the like.
+            for ch in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&ch) {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Asks `script` for completions of `call.query`, with `ROFI_RETV` 20.
@@ -411,7 +504,9 @@ mod tests {
             matches!(&events[0], Event::Mode { call: 7, key, value } if key == "prompt" && value == "Power")
         );
         assert!(matches!(events[1], Event::FirstRow { call: 7 }));
-        assert!(matches!(events[2], Event::Done { call: 7, rows: 2, status } if status.success()));
+        assert!(
+            matches!(&events[2], Event::Done { call: 7, rows: 2, status, stderr } if status.success() && stderr.is_empty())
+        );
     }
 
     #[test]
@@ -483,5 +578,39 @@ mod tests {
         assert!(
             matches!(events[0], Event::Done { rows: 0, status, .. } if status.code() == Some(3))
         );
+    }
+
+    #[test]
+    fn failed_first_call_reports_what_it_said() {
+        let script = "echo 'rbw: the vault is locked' >&2; exit 1";
+        let (_, events) = run(script, Call::initial());
+        assert!(
+            matches!(&events[0], Event::Done { stderr, .. } if stderr == "rbw: the vault is locked")
+        );
+        // A picked call keeps sieb's own stderr, and nothing is kept.
+        let picked = Call {
+            retv: Retv::Entry,
+            ..Call::initial()
+        };
+        let (_, events) = run("echo oops >&2; exit 1", picked);
+        assert!(matches!(&events[0], Event::Done { stderr, .. } if stderr.is_empty()));
+    }
+
+    #[test]
+    fn said_does_not_wait_for_a_program_left_running() {
+        // The sleep inherits stderr and holds it open well past the exit.
+        let script = "echo first >&2; sleep 5 > /dev/null & exit 1";
+        let start = std::time::Instant::now();
+        let (_, events) = run(script, Call::initial());
+        assert!(matches!(&events[0], Event::Done { stderr, .. } if stderr == "first"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn last_lines_keeps_the_end_without_blanks_or_colors() {
+        let text = "one\n\n\u{1b}[31mtwo\u{1b}[0m  \nthree\n";
+        assert_eq!(last_lines(text, 2), "two\nthree");
+        assert_eq!(last_lines(text, 9), "one\ntwo\nthree");
+        assert_eq!(last_lines("", 3), "");
     }
 }

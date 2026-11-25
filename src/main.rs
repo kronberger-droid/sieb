@@ -109,7 +109,7 @@ fn pick(case: CaseMatching, cli: Cli, format: Format, print: Print) -> ExitCode 
     let (font, layout, mut theme) = match look {
         Ok(look) => look,
         // Shown in the default look, the one asked for being what broke.
-        Err(err) => return fail_shown("config error", err, None),
+        Err(err) => return fail_shown("config error", err, "", None),
     };
     // The config's placeholder is written for a search field, and would
     // read like one over a password. One given with the flag is meant.
@@ -156,10 +156,13 @@ fn pick(case: CaseMatching, cli: Cli, format: Format, print: Print) -> ExitCode 
             }
             print_secret(&secret)
         }
-        Ok(window::Outcome::Failed(err)) => fail_shown("script failed", err, Some(look)),
+        Ok(window::Outcome::Failed(err)) => fail_shown("script failed", err, "", Some(look)),
+        Ok(window::Outcome::ScriptFailed { reason, stderr }) => {
+            fail_shown("script failed", reason, &stderr, Some(look))
+        }
         // The font or the compositor, so in the default look. Where it is
         // the compositor, the notice fails the same way and stays away.
-        Err(err) => fail_shown("could not start", err, None),
+        Err(err) => fail_shown("could not start", err, "", None),
     }
 }
 
@@ -185,10 +188,19 @@ type Look = (String, Layout, Theme);
 /// Reports `err` on stderr and, when that is not a terminal, in a panel of
 /// its own to read and dismiss. Started from a keybind, stderr goes where
 /// nobody looks, and a picker that just does not come up says nothing
-/// about why.
-fn fail_shown(title: &str, err: impl std::fmt::Display, look: Option<Look>) -> ExitCode {
-    let text = err.to_string();
+/// about why. `said` is what a script wrote to stderr itself: the panel
+/// shows it under `err`, and stderr has had it already.
+fn fail_shown(
+    title: &str,
+    err: impl std::fmt::Display,
+    said: &str,
+    look: Option<Look>,
+) -> ExitCode {
+    let mut text = err.to_string();
     eprintln!("sieb: {text}");
+    if !said.is_empty() {
+        text = format!("{text}\n{said}");
+    }
     let look = look.or_else(|| config::Appearance::default().resolve().ok());
     if !io::stderr().is_terminal()
         && let Some((font, layout, theme)) = look

@@ -41,7 +41,8 @@ A config file that does not load, or a script that cannot start or fails
 before its first menu, is reported on stderr with exit code 2. Started
 from a keybind, where stderr goes unread, sieb also shows the reason in a
 panel of its own, which Enter or Escape closes. From a terminal it only
-prints.
+prints. For a script whose first call fails, the panel includes the last
+lines the script wrote to stderr.
 
 ## JSON
 

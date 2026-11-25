@@ -129,6 +129,13 @@ pub enum Outcome {
     /// Password mode's Enter. Wiped when dropped.
     Secret(Secret),
     Failed(String),
+    /// A script exited with an error before it had a menu up. `stderr` is
+    /// the end of what it wrote there, which sieb's own stderr has had
+    /// already.
+    ScriptFailed {
+        reason: String,
+        stderr: String,
+    },
 }
 
 /// Options a script sets for its menu with `\0key\x1fvalue` lines, or
@@ -1170,7 +1177,12 @@ impl App {
                     FirstRow::Stale => {}
                 }
             }
-            script::Event::Done { call, status, rows } => {
+            script::Event::Done {
+                call,
+                status,
+                rows,
+                stderr,
+            } => {
                 let path = script.path().display().to_string();
                 let on_screen = match script.session.done(call) {
                     Done::Ended => {
@@ -1178,7 +1190,10 @@ impl App {
                         self.outcome = Some(if status.success() {
                             Outcome::Quit
                         } else {
-                            Outcome::Failed(format!("{path} exited with {status}"))
+                            Outcome::ScriptFailed {
+                                reason: format!("{path} exited with {status}"),
+                                stderr,
+                            }
                         });
                         return;
                     }
