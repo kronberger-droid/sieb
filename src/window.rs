@@ -924,7 +924,10 @@ impl App {
         if let Some(script) = &mut self.script {
             script.visible = Some(pending.id);
         }
-        let keep_query = pending.menu.keep_filter || pending.is_switch();
+        // The first menu has no pick behind it that the query belonged to:
+        // what is typed by then was typed ahead, for this menu.
+        let keep_query =
+            pending.menu.keep_filter || pending.is_switch() || pending.id == FIRST_CALL;
         self.matcher = pending.matcher;
         self.menu = pending.menu;
         if !keep_query {
