@@ -1318,8 +1318,16 @@ impl LayerShellHandler for App {
             self.outcome = Some(Outcome::Cancel);
             return;
         }
-        self.size = Some((width, height));
+        let size = Some((width, height));
         // A configure must be answered with a commit, frame callback or not.
+        // The compositor sends a couple more of the same size once the
+        // surface maps: those get the commit alone, since the frame on
+        // screen is still right.
+        if self.size == size && self.backdrop_buffer.is_some() && !self.dirty {
+            self.layer.commit();
+            return;
+        }
+        self.size = size;
         self.draw();
     }
 }
