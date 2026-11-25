@@ -114,6 +114,8 @@ enum Press {
 enum Event {
     /// A menu option from stdin, which has no calls to tie it to.
     Option(String, String),
+    /// Stdin is read to its end: every row is in.
+    End,
     Script(script::Event),
 }
 
@@ -361,6 +363,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
             let matcher = Matcher::new(options.case, wake.notify.clone());
             // Read errors just end the list; there is no one to report
             // them to mid-pick.
+            let ended = events.clone();
             let _ = matcher::spawn_reader(
                 BufReader::new(io::stdin()),
                 matcher.injector(),
@@ -368,6 +371,9 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
                 field,
                 move |key, value| {
                     let _ = events.send(Event::Option(key, value));
+                },
+                move || {
+                    let _ = ended.send(Event::End);
                 },
             );
             matcher
@@ -1053,6 +1059,10 @@ impl App {
                 self.redraw();
                 return;
             }
+            Event::End => {
+                self.land();
+                return;
+            }
             Event::Script(event) => event,
         };
         let Some(script) = &mut self.script else {
@@ -1131,15 +1141,22 @@ impl App {
                 if !status.success() {
                     eprintln!("sieb: {path} exited with {status}");
                 }
-                if on_screen && self.picker.waiting() {
-                    // No more rows are coming, but the last may not be
-                    // ranked yet: a rank past the end takes the last row.
-                    self.matcher.settle(Duration::from_millis(50));
-                    self.refresh();
-                    self.picker.land(self.matcher.matched());
-                    self.redraw();
+                if on_screen {
+                    self.land();
                 }
             }
+        }
+    }
+
+    /// The menu on screen has every row it is going to get: a selection
+    /// it asked for past the end takes the last row.
+    fn land(&mut self) {
+        if self.picker.waiting() {
+            // The last rows may not be ranked yet.
+            self.matcher.settle(Duration::from_millis(50));
+            self.refresh();
+            self.picker.land(self.matcher.matched());
+            self.redraw();
         }
     }
 

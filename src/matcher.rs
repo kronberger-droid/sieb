@@ -194,26 +194,30 @@ impl Matcher {
 /// Reads lines from `reader` into the matcher on a background thread.
 ///
 /// Menu options in the input (JSON only) go to `on_mode`. `field` is the
-/// JSON key shown as each record's text, see [`format::feed`].
+/// JSON key shown as each record's text, see [`format::feed`]. `on_end`
+/// runs once the input is read to its end, or stopped on an error.
 pub fn spawn_reader<R>(
     reader: R,
     injector: Injector<Entry>,
     format: Format,
     field: Option<String>,
     mut on_mode: impl FnMut(String, String) + Send + 'static,
+    on_end: impl FnOnce() + Send + 'static,
 ) -> JoinHandle<io::Result<()>>
 where
     R: BufRead + Send + 'static,
 {
     thread::spawn(move || {
         let mut index = 0;
-        format::feed(reader, format, field.as_deref(), |line| match line {
+        let read = format::feed(reader, format, field.as_deref(), |line| match line {
             Line::Mode(key, value) => on_mode(key, value),
             Line::Row(row) => {
                 push(&injector, index, row);
                 index += 1;
             }
-        })
+        });
+        on_end();
+        read
     })
 }
 
@@ -240,6 +244,7 @@ mod tests {
             Format::Plain,
             None,
             |_, _| {},
+            || {},
         )
         .join()
         .unwrap()

@@ -183,6 +183,7 @@ fn filter(
         format,
         field,
         |_, _| {},
+        || {},
     );
     // The worker going idle only means it caught up with what was injected so
     // far, so wait for EOF before draining it.
