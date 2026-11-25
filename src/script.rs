@@ -448,13 +448,14 @@ mod tests {
         use nucleo::pattern::CaseMatching;
         use std::sync::{Arc, mpsc};
 
-        let path = script_file(body);
         let mut matcher = Matcher::new(CaseMatching::Smart, Arc::new(|| {}));
         let (sender, receiver) = mpsc::channel();
         let send = move |event| {
             let _ = sender.send(event);
         };
-        spawn(&path, call, 7, matcher.injector(), send).unwrap();
+        let injector = matcher.injector();
+        let (path, running) = with_script(body, |path| spawn(path, call, 7, injector, send));
+        running.unwrap();
 
         let mut events = Vec::new();
         while !events.iter().any(|e| matches!(e, Event::Done { .. })) {
@@ -466,17 +467,29 @@ mod tests {
         (rows, events)
     }
 
-    /// `body` as an executable sh script in a temp dir, named after it so
-    /// tests running at once do not overwrite each other's.
-    fn script_file(body: &str) -> PathBuf {
+    /// Writes `body` as an executable sh script in a temp dir, named after it
+    /// so tests running at once do not overwrite each other's, and hands it
+    /// to `start`, which executes it.
+    ///
+    /// One test at a time gets from the write to the end of `start`. A child
+    /// forked by another test meanwhile would inherit the descriptor the
+    /// script is written through and hold it until its own exec, and
+    /// executing a file that is open for writing fails with ETXTBSY.
+    fn with_script<T>(body: &str, start: impl FnOnce(&Path) -> T) -> (PathBuf, T) {
         use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Mutex, PoisonError};
+
+        static STARTING: Mutex<()> = Mutex::new(());
+        // A test that panicked in here guarded nothing worth distrusting.
+        let _starting = STARTING.lock().unwrap_or_else(PoisonError::into_inner);
 
         let dir = std::env::temp_dir().join(format!("sieb-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("script-{:x}", body.len() ^ body.as_ptr() as usize));
         std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        let started = start(&path);
+        (path, started)
     }
 
     #[test]
@@ -543,9 +556,7 @@ mod tests {
     fn completions_take_info_as_the_query() {
         use std::sync::mpsc;
 
-        let path = script_file(
-            r"printf '\0prompt\037ignored\nwhere\0info\037ls | where\n'; echo $ROFI_RETV",
-        );
+        let script = r"printf '\0prompt\037ignored\nwhere\0info\037ls | where\n'; echo $ROFI_RETV";
         let (sender, receiver) = mpsc::channel();
         let call = Call {
             retv: Retv::Complete,
@@ -553,10 +564,12 @@ mod tests {
             query: "ls | wh".into(),
             ..Call::initial()
         };
-        let mut child = complete(&path, call, 3, move |event| {
-            let _ = sender.send(event);
-        })
-        .unwrap();
+        let (path, child) = with_script(script, |path| {
+            complete(path, call, 3, move |event| {
+                let _ = sender.send(event);
+            })
+        });
+        let mut child = child.unwrap();
         let event = receiver.recv().unwrap();
         let _ = child.wait();
         let _ = std::fs::remove_file(path);
