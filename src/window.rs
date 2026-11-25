@@ -854,6 +854,18 @@ impl App {
     /// tells the script as `ROFI_RETV` 9+N, or the caller through that exit
     /// code, which other action the pick wants.
     fn accept(&mut self, accept: Accept, kb: Option<u8>) {
+        // What may be picked at all is the same for stdin and scripts, so
+        // it is settled before the two part ways.
+        let refused = match accept {
+            Accept::Match(rank) => !self
+                .matcher
+                .get(rank)
+                .is_some_and(|entry| entry.row.selectable),
+            Accept::Query => self.menu.no_custom,
+        };
+        if refused {
+            return;
+        }
         let Some(script) = &mut self.script else {
             let code = kb.map_or(0, |n| 9 + n);
             self.outcome = Some(Outcome::Accept(self.output(accept), code));
@@ -867,14 +879,13 @@ impl App {
         let query = self.picker.query();
         let (retv, arg, info) = match accept {
             Accept::Match(rank) => match self.matcher.get(rank) {
-                Some(entry) if entry.row.selectable => (
+                Some(entry) => (
                     Retv::Entry,
                     entry.row.text.as_str(),
                     entry.row.info().map(str::to_owned),
                 ),
-                _ => return,
+                None => return,
             },
-            Accept::Query if self.menu.no_custom => return,
             Accept::Query => (Retv::Custom, query, None),
         };
         let retv = kb.map_or(retv, Retv::Kb);
