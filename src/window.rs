@@ -508,6 +508,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         seat: None,
         serial: 0,
         keyboard: None,
+        released: Vec::new(),
         pointer: None,
         shape_device: None,
         modifiers: Modifiers::default(),
@@ -605,6 +606,8 @@ struct App {
     seat: Option<wl_seat::WlSeat>,
     serial: u32,
     keyboard: Option<wl_keyboard::WlKeyboard>,
+    /// Keyboards that went away: see `remove_capability`.
+    released: Vec<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
     shape_device: Option<WpCursorShapeDeviceV1>,
     modifiers: Modifiers,
@@ -1563,6 +1566,12 @@ impl SeatHandler for App {
             && let Some(keyboard) = self.keyboard.take()
         {
             keyboard.release();
+            // Kept until sieb exits, not dropped here. With the last handle
+            // gone, the keyboard's data would be dropped when the server
+            // confirms the release, which may be while calloop reads from
+            // the socket: sctk 0.21 then removes its repeat timer from the
+            // loop it is being called by, and calloop panics on the borrow.
+            self.released.push(keyboard);
         }
         if capability == Capability::Pointer {
             if let Some(device) = self.shape_device.take() {
