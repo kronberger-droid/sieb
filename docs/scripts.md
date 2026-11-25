@@ -36,7 +36,10 @@ menu options are `prompt`, `message`, `data`, `no-custom`, `keep-filter`,
 `new-selection` counts rows from 0 and can come anywhere in the output.
 Rows are shown as they arrive, so the selection moves once that row is
 in, and to the last row if the script ends before it. Moving or typing
-first keeps the selection where the user put it.
+first keeps the selection where the user put it. Given before the first
+row, it also holds the menu back for up to 150ms while that row is on
+its way, so a script that prints its rows in one go opens with the
+selection in place instead of jumping to it.
 
 `custom-keys` is sieb's own: up to nine keys, separated by commas, that
 pick the selection like Enter but send `ROFI_RETV` 11, 12 and on, in the

@@ -202,6 +202,10 @@ struct Pending {
     /// switch: it keeps the query, like rofi, and shows an empty list
     /// rather than closing if it prints nothing.
     retv: Retv,
+    /// Its first row is in, but not yet the one it wants selected: the
+    /// menu waits for that row, so its first frame has the selection in
+    /// place instead of jumping there.
+    held: bool,
 }
 
 impl Pending {
@@ -239,6 +243,11 @@ fn message<'a>(
 /// How long typing pauses before the script is asked for completions, so a
 /// word typed in one go costs one call.
 const COMPLETE_AFTER: Duration = Duration::from_millis(150);
+
+/// How long a menu that asks for a selection waits for that row before it
+/// is shown without it. Long enough for a script that prints its rows in
+/// one go, short enough that a slow one does not look stuck.
+const HOLD: Duration = Duration::from_millis(150);
 
 /// Completions of the query, for a menu with the `complete` option.
 #[derive(Default)]
@@ -662,6 +671,8 @@ impl App {
 
     /// Picks up new matcher results.
     fn refresh(&mut self) {
+        // The wake is shared with a menu on its way in.
+        self.release(None);
         let status = self.matcher.tick(0);
         self.picker.clamp(self.matcher.matched());
         if status.changed {
@@ -980,15 +991,30 @@ impl App {
                 }
             }
             script::Event::FirstRow { call } => {
-                if let Some(pending) = script.take_running(call) {
+                let held = match &mut script.busy {
+                    Busy::Running(pending) if pending.id == call => {
+                        pending.held = pending.menu.new_selection.is_some();
+                        pending.held
+                    }
+                    _ => false,
+                };
+                if held {
+                    let timer = Timer::from_duration(HOLD);
+                    let _ = self.loop_handle.insert_source(timer, move |_, _, app| {
+                        app.release(Some(call));
+                        TimeoutAction::Drop
+                    });
+                    self.release(None);
+                } else if let Some(pending) = script.take_running(call) {
                     self.show(pending);
                 }
             }
             script::Event::Done { call, status, rows } => {
                 let path = script.path().display().to_string();
                 match script.take_running(call) {
-                    // A mode with nothing to list still gets its screen.
-                    Some(pending) if pending.is_switch() => self.show(pending),
+                    // A mode with nothing to list still gets its screen,
+                    // and a held menu has every row it is going to get.
+                    Some(pending) if pending.is_switch() || pending.held => self.show(pending),
                     // Rows would have shown the menu already, so this call
                     // printed nothing: the script is done.
                     Some(_) => {
@@ -1015,6 +1041,32 @@ impl App {
                     self.redraw();
                 }
             }
+        }
+    }
+
+    /// Shows a held menu once the row it wants selected is in. `overdue`
+    /// is the call whose [`HOLD`] ran out, which is shown as it is.
+    fn release(&mut self, overdue: Option<u32>) {
+        let Some(script) = &mut self.script else {
+            return;
+        };
+        let Busy::Running(pending) = &mut script.busy else {
+            return;
+        };
+        if !pending.held {
+            return;
+        }
+        let ready = match overdue {
+            Some(call) => call == pending.id,
+            None => {
+                pending.matcher.tick(0);
+                let rows = pending.matcher.counts().1;
+                pending.menu.new_selection.is_none_or(|rank| rank < rows)
+            }
+        };
+        let id = pending.id;
+        if ready && let Some(pending) = script.take_running(id) {
+            self.show(pending);
         }
     }
 
@@ -1222,6 +1274,7 @@ impl ScriptState {
             matcher,
             menu: Menu::default(),
             retv,
+            held: false,
         }));
         Ok(())
     }
