@@ -117,6 +117,12 @@
         nativeBuildInputs = [
           (toolchainFor pkgs)
           pkgs.pkg-config
+          # For trying sieb without a desktop session: sway runs headless
+          # (`WLR_BACKENDS=headless`), wtype sends keys and grim takes
+          # screenshots.
+          pkgs.sway
+          pkgs.wtype
+          pkgs.grim
         ];
         buildInputs = nativeDepsFor pkgs;
       };
