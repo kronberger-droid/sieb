@@ -23,8 +23,8 @@ pub struct Prompt {
 }
 
 impl Prompt {
-    /// The one line the message box has room for: the error when there is
-    /// one, since that is the news, else the description.
+    /// What the message box says: the error when there is one, since that
+    /// is the news, else the description.
     pub fn message(&self) -> Option<String> {
         let text = self.error.as_ref().or(self.description.as_ref())?;
         Some(text.split_whitespace().collect::<Vec<_>>().join(" "))

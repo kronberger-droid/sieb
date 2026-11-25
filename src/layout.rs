@@ -28,8 +28,9 @@ pub struct Layout {
     /// Rows in the list. 0 means no list at all, as for a password prompt;
     /// config rejects it, so only callers that want that get it.
     pub lines: u32,
-    /// A script set a message, shown in a box of its own above the list.
-    pub message: bool,
+    /// Lines of the message box above the list, which a script's message
+    /// fills wrapped to the panel's width. 0 for no box.
+    pub message: u32,
     /// Mode buttons under the list, one per script; none for fewer than 2.
     pub buttons: usize,
     /// Room under the list, left over when the message box took rows from
@@ -50,7 +51,7 @@ impl Default for Layout {
             row_spacing: 0.0,
             message_padding: 6.5,
             lines: 10,
-            message: false,
+            message: 0,
             buttons: 0,
             slack: 0.0,
         }
@@ -92,12 +93,14 @@ impl Layout {
         }
     }
 
+    /// Height of the message box, which has a line even before it is
+    /// shown, for working out the room it will take.
     pub fn message_height(&self) -> f32 {
-        self.line() + 2.0 * self.message_padding
+        self.message.max(1) as f32 * self.line() + 2.0 * self.message_padding
     }
 
     pub fn list_top(&self) -> f32 {
-        let message = if self.message {
+        let message = if self.message > 0 {
             self.message_height() + self.spacing
         } else {
             0.0
@@ -116,14 +119,14 @@ impl Layout {
     /// Whether anything sits below the input row, which is what the
     /// separator separates it from.
     pub fn has_below(&self) -> bool {
-        self.lines > 0 || self.message
+        self.lines > 0 || self.message > 0
     }
 
     /// Bottom of the last of input, message and list that is there.
     fn content_bottom(&self) -> f32 {
         if self.lines > 0 {
             self.list_top() + self.list_height() + self.slack
-        } else if self.message {
+        } else if self.message > 0 {
             self.message_top() + self.message_height()
         } else {
             self.input_top() + self.input_height()
@@ -136,16 +139,16 @@ impl Layout {
     /// and goes while typing, so the panel does not jump with it. With no
     /// list to take from, or a single row, the panel grows instead.
     pub fn message_over_list(self) -> Self {
-        if self.message || self.lines < 2 {
+        if self.message > 0 || self.lines < 2 {
             return Self {
-                message: true,
+                message: self.message.max(1),
                 ..self
             };
         }
         let needed = self.message_height() + self.spacing;
         let taken = (needed / (self.row() + self.row_spacing)).ceil() as u32;
         let shown = Self {
-            message: true,
+            message: 1,
             lines: self.lines - taken.min(self.lines - 1),
             ..self
         };
@@ -267,12 +270,30 @@ mod tests {
     fn message_pushes_the_list_down() {
         let mut layout = layout();
         let (top, height) = (layout.row_top(0), layout.height());
-        layout.message = true;
+        layout.message = 1;
         let shift = layout.message_height() + layout.spacing;
         assert_eq!(layout.row_top(0), top + shift);
         assert_eq!(layout.height(), height + shift);
         // The message box is not a list row.
         assert_eq!(layout.row_at(layout.message_top() as f64 + 1.0), None);
+    }
+
+    #[test]
+    fn message_box_grows_by_the_line() {
+        let one = Layout {
+            message: 1,
+            ..layout()
+        };
+        let three = Layout {
+            message: 3,
+            ..layout()
+        };
+        assert_eq!(
+            three.message_height(),
+            one.message_height() + 2.0 * one.line()
+        );
+        assert_eq!(three.row_top(0), one.row_top(0) + 2.0 * one.line());
+        assert_eq!(three.height(), one.height() + 2.0 * one.line());
     }
 
     #[test]
@@ -288,7 +309,7 @@ mod tests {
             },
         ] {
             let over = layout.message_over_list();
-            assert!(over.message);
+            assert_eq!(over.message, 1);
             // Whole rows, as many as the box and its gap need.
             let pitch = layout.row() + layout.row_spacing;
             let taken = layout.lines - over.lines;
@@ -359,7 +380,7 @@ mod tests {
     fn no_list_ends_after_the_message() {
         let layout = Layout {
             lines: 0,
-            message: true,
+            message: 1,
             ..layout()
         };
         let bottom = layout.message_top() + layout.message_height();

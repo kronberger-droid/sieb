@@ -241,6 +241,52 @@ pub fn wrap(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec
     lines
 }
 
+/// [`wrap`] for text whose spacing is its own, as a line of key hints set
+/// apart by wider gaps: what fits on one line stays as it is, and a longer
+/// one breaks at a gap of two or more spaces if it has one, so what those
+/// set apart stays together. The spaces inside a line are kept.
+pub fn wrap_spaced(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.lines() {
+        let mut rest = paragraph.trim();
+        while !rest.is_empty() {
+            if measure(rest) <= width {
+                lines.push(rest.to_owned());
+                break;
+            }
+            // The last gap whose head still fits, a wide one before any
+            // other: where the head ends and where the tail starts.
+            let mut best: Option<(usize, usize, bool)> = None;
+            let mut at = 0;
+            while let Some(start) = rest[at..].find(char::is_whitespace).map(|i| at + i) {
+                let gap = &rest[start..];
+                let end = start + gap.len() - gap.trim_start().len();
+                if measure(&rest[..start]) > width {
+                    break;
+                }
+                let wide = end - start > 1;
+                if wide || !best.is_some_and(|(_, _, wide)| wide) {
+                    best = Some((start, end, wide));
+                }
+                at = end;
+            }
+            match best {
+                Some((start, end, _)) => {
+                    lines.push(rest[..start].to_owned());
+                    rest = &rest[end..];
+                }
+                // Not even the first word fits: it goes in pieces.
+                None => {
+                    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                    lines.append(&mut wrap(&rest[..end], width, &mut measure));
+                    rest = rest[end..].trim_start();
+                }
+            }
+        }
+    }
+    lines
+}
+
 /// Has fontconfig drop the faces that add no characters to the ones sorted
 /// before them. fontconfig 0.11 hands its enum to `FcFontSort` as the
 /// `FcBool`, and `Trim` is the variant numbered 0, so it is `NoTrim` that
@@ -428,6 +474,38 @@ mod tests {
         );
         // Room for less than one character still makes progress.
         assert_eq!(wrapped("abc", 0.5), ["a", "b", "c"]);
+    }
+
+    /// Wraps spaced text with every character one unit wide.
+    fn spaced(text: &str, width: f32) -> Vec<String> {
+        wrap_spaced(text, width, |line| line.chars().count() as f32)
+    }
+
+    #[test]
+    fn wrap_spaced_keeps_a_line_that_fits() {
+        assert_eq!(spaced("  a: b    c: d ", 12.0), ["a: b    c: d"]);
+        assert!(spaced("", 10.0).is_empty());
+    }
+
+    #[test]
+    fn wrap_spaced_breaks_at_wide_gaps_first() {
+        // "c: d    e:" would fit, and would split what belongs together.
+        assert_eq!(
+            spaced("a: b    c: d    e: f", 14.0),
+            ["a: b    c: d", "e: f"]
+        );
+        // With single spaces only, any of them will do.
+        assert_eq!(spaced("one two three", 9.0), ["one two", "three"]);
+        // A wide gap too far in is no use.
+        assert_eq!(
+            spaced("one two three    four", 9.0),
+            ["one two", "three", "four"]
+        );
+    }
+
+    #[test]
+    fn wrap_spaced_splits_a_word_wider_than_the_line() {
+        assert_eq!(spaced("/a/long/path  x", 6.0), ["/a/lon", "g/path", "x"]);
     }
 
     /// Fails once the fontconfig crate numbers its variants the way their
