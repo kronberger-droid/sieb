@@ -1409,7 +1409,11 @@ impl ActivationHandler for App {
         let Some(script) = &mut self.script else {
             return;
         };
-        // A mode switch in the meantime has dropped the call.
+        // A mode switch in the meantime has dropped the call and started
+        // its own, which must stay as it is.
+        if !matches!(script.busy, Busy::AwaitingToken(_)) {
+            return;
+        }
         if let Busy::AwaitingToken(call) = std::mem::replace(&mut script.busy, Busy::Idle) {
             self.start(Call {
                 token: Some(token),
