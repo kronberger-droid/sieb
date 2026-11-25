@@ -1358,6 +1358,8 @@ impl App {
                     text: &entry.row.text,
                     styles: entry.row.styles(),
                     indices,
+                    // A notice's rows are text to read, not rows to pick.
+                    dim: !entry.row.selectable && self.notice.is_none(),
                 })
                 .collect(),
             selected,

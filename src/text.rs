@@ -28,7 +28,12 @@ pub struct Canvas<'a> {
 pub struct Clip {
     pub left: i32,
     pub right: i32,
+    /// End text that runs past `right` in an ellipsis instead of cutting
+    /// it mid-letter, so it shows that there is more.
+    pub ellipsis: bool,
 }
+
+const ELLIPSIS: &str = "\u{2026}";
 
 pub struct Text {
     fonts: FontSystem,
@@ -148,20 +153,53 @@ impl Text {
         spans: impl IntoIterator<Item = Span<'s>>,
     ) -> f32 {
         let buffer = self.shape(size, spans);
-        let mut width: f32 = 0.0;
+        let width = buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0, f32::max);
+        // Too wide for its room: only the glyphs that leave space for the
+        // ellipsis are drawn, and it goes where they end.
+        let room = clip.right as f32 - x;
+        let cut = (clip.ellipsis && width > room).then(|| room - self.width(size, ELLIPSIS));
+        let mut end: f32 = 0.0;
+        let mut last = Color(0xff_ff_ff_ff);
         for run in buffer.layout_runs() {
-            width = width.max(run.line_w);
             for glyph in run.glyphs {
-                let physical = glyph.physical((x, y + run.line_y), 1.0);
+                if cut.is_some_and(|cut| glyph.x + glyph.w > cut) {
+                    continue;
+                }
                 let color = glyph.color_opt.unwrap_or(Color(0xff_ff_ff_ff));
-                if let Some(image) = self.glyphs.get_image(&mut self.fonts, physical.cache_key) {
-                    let left = physical.x + image.placement.left;
-                    let top = physical.y - image.placement.top;
-                    blit(canvas, clip, left, top, image, color);
+                end = end.max(glyph.x + glyph.w);
+                last = color;
+                self.blit_glyph(canvas, clip, glyph, (x, y + run.line_y), color);
+            }
+        }
+        if cut.is_some() {
+            // In the color of the text it follows.
+            let dots = self.shape(size, [(ELLIPSIS, last, markup::Style::default())]);
+            for run in dots.layout_runs() {
+                for glyph in run.glyphs {
+                    self.blit_glyph(canvas, clip, glyph, (x + end, y + run.line_y), last);
                 }
             }
         }
         width
+    }
+
+    fn blit_glyph(
+        &mut self,
+        canvas: &mut Canvas,
+        clip: Clip,
+        glyph: &cosmic_text::LayoutGlyph,
+        origin: (f32, f32),
+        color: Color,
+    ) {
+        let physical = glyph.physical(origin, 1.0);
+        if let Some(image) = self.glyphs.get_image(&mut self.fonts, physical.cache_key) {
+            let left = physical.x + image.placement.left;
+            let top = physical.y - image.placement.top;
+            blit(canvas, clip, left, top, image, color);
+        }
     }
 }
 

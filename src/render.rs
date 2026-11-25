@@ -122,6 +122,8 @@ pub struct RowView<'a> {
     pub styles: &'a [(Range<usize>, Style)],
     /// Grapheme indices that matched the query.
     pub indices: Vec<u32>,
+    /// Drawn in the dim color: the row cannot be picked.
+    pub dim: bool,
 }
 
 /// A horizontal span of the input row, in physical pixels.
@@ -341,6 +343,7 @@ pub fn panel(
     let clip = |left: f32, right: f32| Clip {
         left: left as i32,
         right: right as i32,
+        ellipsis: false,
     };
 
     // Input row: badge, prompt, query or placeholder, caret, counter.
@@ -376,7 +379,10 @@ pub fn panel(
     if let Some(message) = view.message {
         let x = left + s(layout.message_padding);
         let y = text_top(message_top, message_height);
-        let clip = clip(left, right - s(layout.message_padding));
+        let clip = Clip {
+            ellipsis: true,
+            ..clip(left, right - s(layout.message_padding))
+        };
         let mark = view
             .message_mark
             .clone()
@@ -397,7 +403,10 @@ pub fn panel(
 
     // Match list.
     let row_left = left + s(layout.row_padding);
-    let row_clip = clip(left, list_right - s(layout.row_padding));
+    let row_clip = Clip {
+        ellipsis: true,
+        ..clip(left, list_right - s(layout.row_padding))
+    };
     for (i, row) in view.rows.iter().enumerate() {
         let y = text_top(s(layout.row_top(i)), row_height);
         let (normal, hit) = if view.selected == Some(i) {
@@ -405,12 +414,15 @@ pub fn panel(
         } else {
             (c.text, c.matched)
         };
+        // A row that cannot be picked looks it, selected or not.
+        let normal = if row.dim { c.dim } else { normal };
+        let own_color = !row.dim && view.selected != Some(i);
         let spans = highlight(row.text, &row.indices, row.styles);
         let spans = spans.iter().map(|&(span, matched, style)| {
             // A markup color yields to the match color, so matches stay
-            // visible, and to the selection's text color.
+            // visible, to the selection's text color and to the dimming.
             let [r, g, b, a] = match style.color {
-                Some([r, g, b]) if !matched && view.selected != Some(i) => [r, g, b, 0xff],
+                Some([r, g, b]) if !matched && own_color => [r, g, b, 0xff],
                 _ if matched => hit,
                 _ => normal,
             };
@@ -622,6 +634,7 @@ mod tests {
                 text: ["src/window.rs", "Cargo.toml", "flake.nix"][i % 3],
                 styles: &[],
                 indices: vec![0, 2, 4],
+                dim: false,
             })
             .collect();
         let view = View {
