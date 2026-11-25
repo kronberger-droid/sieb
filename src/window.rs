@@ -249,6 +249,11 @@ const COMPLETE_AFTER: Duration = Duration::from_millis(150);
 /// one go, short enough that a slow one does not look stuck.
 const HOLD: Duration = Duration::from_millis(150);
 
+/// How long the panel waits for a script's first menu before it opens
+/// empty. The backdrop is up meanwhile and has the keyboard, so nothing
+/// typed is lost; past this, an empty panel says sieb is there.
+const OPEN_AFTER: Duration = Duration::from_millis(150);
+
 /// Completions of the query, for a menu with the `complete` option.
 #[derive(Default)]
 struct Completions {
@@ -443,6 +448,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
     // Room for two buffers at scale 2 before the pool has to grow.
     let pool = SlotPool::new(pw as usize * ph as usize * 4 * 8, &shm)?;
     let text = text.join().expect("font thread panicked")?;
+    let opening = script.is_some();
     let mut app = App {
         registry: RegistryState::new(&globals),
         seats: SeatState::new(&globals, &qh),
@@ -477,6 +483,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         text,
         frame_pending: false,
         dirty: false,
+        opening,
 
         size: None,
         scale: 1.0,
@@ -510,6 +517,16 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         })
         .map_err(|err| err.error)?;
     WaylandSource::new(conn, event_queue).insert(event_loop.handle())?;
+    if app.opening {
+        let timer = Timer::from_duration(OPEN_AFTER);
+        event_loop
+            .handle()
+            .insert_source(timer, |_, _, app| {
+                app.open();
+                TimeoutAction::Drop
+            })
+            .map_err(|err| err.error)?;
+    }
     while app.outcome.is_none() {
         event_loop.dispatch(None, &mut app)?;
     }
@@ -559,6 +576,10 @@ struct App {
     frame_pending: bool,
     /// Something changed since the last draw.
     dirty: bool,
+    /// A script's first menu is still on its way: the backdrop is up and
+    /// the panel is not, so sieb opens on the menu instead of on an empty
+    /// list that fills a moment later.
+    opening: bool,
 
     /// Logical output size, known after the first configure.
     size: Option<(u32, u32)>,
@@ -924,6 +945,7 @@ impl App {
         if let Some(script) = &mut self.script {
             script.visible = Some(pending.id);
         }
+        self.opening = false;
         // The first menu has no pick behind it that the query belonged to:
         // what is typed by then was typed ahead, for this menu.
         let keep_query =
@@ -1147,12 +1169,54 @@ impl App {
         }
     }
 
-    /// Draws the panel and commits it together with the backdrop.
+    /// [`OPEN_AFTER`] ran out: the panel opens on whatever is there. A menu
+    /// held for its selection is left to show itself, within [`HOLD`].
+    fn open(&mut self) {
+        let held = self
+            .script
+            .as_ref()
+            .is_some_and(|script| matches!(&script.busy, Busy::Running(pending) if pending.held));
+        if self.opening && !held {
+            self.opening = false;
+            self.redraw();
+        }
+    }
+
+    /// Draws the panel, unless it still waits for the first menu, and
+    /// commits it together with the backdrop.
     fn draw(&mut self) {
         let Some((width, height)) = self.size else {
             return;
         };
         self.dirty = false;
+        if !self.opening {
+            self.draw_panel(width, height);
+        }
+
+        let backdrop = self.layer.wl_surface();
+        if self.backdrop_buffer.is_none() {
+            let (buffer, canvas) = self
+                .pool
+                .create_buffer(1, 1, 4, wl_shm::Format::Argb8888)
+                .expect("allocate backdrop buffer");
+            render::backdrop(&mut canvas[..4], self.options.theme.colors.backdrop);
+            buffer.attach_to(backdrop).expect("attach backdrop buffer");
+            backdrop.damage_buffer(0, 0, 1, 1);
+            self.backdrop_buffer = Some(buffer);
+        }
+        self.backdrop_viewport
+            .set_destination(width as i32, height as i32);
+        // Every draw commits the parent, so that is where the callback goes.
+        backdrop.frame(&self.qh, FrameCallbackData(backdrop.clone()));
+        self.frame_pending = true;
+        // The panel is a synced subsurface, so its own commit only becomes
+        // visible here, together with the backdrop. No half-drawn first frame.
+        self.layer.commit();
+    }
+
+    /// Draws the panel into a fresh buffer and commits it on its
+    /// subsurface, centered on an output of `width` by `height`.
+    fn draw_panel(&mut self, width: u32, height: u32) {
         let layout = self.layout();
         let (pw, ph) = layout.size();
         let (pw, ph) = (pw.min(width), ph.min(height));
@@ -1230,29 +1294,9 @@ impl App {
         self.panel.commit();
         self.panel_buffer = Some(buffer);
 
-        // Centered, like a dialog. Applied with the parent commit below.
+        // Centered, like a dialog. Applied with the parent's commit.
         self.panel_subsurface
             .set_position(((width - pw) / 2) as i32, ((height - ph) / 2) as i32);
-
-        let backdrop = self.layer.wl_surface();
-        if self.backdrop_buffer.is_none() {
-            let (buffer, canvas) = self
-                .pool
-                .create_buffer(1, 1, 4, wl_shm::Format::Argb8888)
-                .expect("allocate backdrop buffer");
-            render::backdrop(&mut canvas[..4], self.options.theme.colors.backdrop);
-            buffer.attach_to(backdrop).expect("attach backdrop buffer");
-            backdrop.damage_buffer(0, 0, 1, 1);
-            self.backdrop_buffer = Some(buffer);
-        }
-        self.backdrop_viewport
-            .set_destination(width as i32, height as i32);
-        // Every draw commits the parent, so that is where the callback goes.
-        backdrop.frame(&self.qh, FrameCallbackData(backdrop.clone()));
-        self.frame_pending = true;
-        // The panel is a synced subsurface, so its commit above only becomes
-        // visible here, together with the backdrop. No half-drawn first frame.
-        self.layer.commit();
     }
 }
 

@@ -16,6 +16,10 @@ the picked row's `info` in `ROFI_INFO`, and the menu's `data`
 in `ROFI_DATA`. Each also exists as `SIEB_*`, and `SIEB_QUERY` holds the
 query.
 
+sieb takes the keyboard right away, and its panel opens once the first
+menu's first row is in, or empty after 150ms when the script takes longer.
+What is typed in the meantime goes into the query.
+
 A script that starts a long-running program has to detach its output,
 since sieb waits for the script's stdout to close.
 
