@@ -82,9 +82,14 @@ included. Typed text prints as `{"text": ...}`, or under `FIELD` with
 | Left, Right | move the cursor in the query |
 | Home, End, Ctrl+A, Ctrl+E | move it to the start / end |
 | Backspace, Delete | delete before / after the cursor |
+| Ctrl+V | paste the clipboard at the cursor |
+| Shift+Insert, middle click | paste the primary selection |
 | Ctrl+W, Ctrl+Backspace | delete a word |
 | Ctrl+U | clear the query |
 | Ctrl+Tab, Shift+Right / Ctrl+Shift+Tab, Shift+Left | next / previous [mode](scripts.md#modes) |
 
 A click picks a row or a mode, a click outside the panel cancels, and the
 wheel scrolls.
+
+Pasted text goes in as one line, its line breaks as spaces. A password
+prompt takes the first line only.

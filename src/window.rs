@@ -12,8 +12,17 @@ use std::time::{Duration, Instant};
 use smithay_client_toolkit::{
     activation::{ActivationHandler, ActivationState, RequestData},
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    data_device_manager::{
+        DataDeviceManagerState,
+        data_device::{DataDevice, DataDeviceHandler},
+        data_offer::{DataOfferHandler, DragOffer},
+    },
     delegate_registry,
     output::{OutputHandler, OutputState},
+    primary_selection::{
+        PrimarySelectionManagerState,
+        device::{PrimarySelectionDevice, PrimarySelectionDeviceHandler},
+    },
     reexports::{
         calloop::{
             EventLoop, LoopHandle, RegistrationToken, channel,
@@ -25,7 +34,8 @@ use smithay_client_toolkit::{
             Connection, Dispatch, QueueHandle, delegate_noop,
             globals::registry_queue_init,
             protocol::{
-                wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface,
+                wl_data_device::WlDataDevice, wl_data_device_manager::DndAction, wl_keyboard,
+                wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface,
             },
         },
         protocols::wp::{
@@ -34,6 +44,7 @@ use smithay_client_toolkit::{
                 wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
                 wp_fractional_scale_v1::{self, WpFractionalScaleV1},
             },
+            primary_selection::zv1::client::zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1,
             viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
         },
     },
@@ -43,7 +54,7 @@ use smithay_client_toolkit::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
         pointer::{
-            BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler,
+            BTN_LEFT, BTN_MIDDLE, PointerEvent, PointerEventKind, PointerHandler,
             cursor_shape::CursorShapeManager,
         },
     },
@@ -65,6 +76,7 @@ use crate::format::{self, Format};
 use crate::keys::{self, Binding};
 use crate::layout::Layout;
 use crate::matcher::{self, Matcher, Print};
+use crate::paste;
 use crate::picker::{Accept, Picker, Wheel};
 use crate::render::{self, Theme, View};
 use crate::script::{self, Call, Mode, Retv};
@@ -73,6 +85,7 @@ use crate::session::{Done, FirstRow, Session, Shown};
 use crate::text::Text;
 use nucleo::pattern::CaseMatching;
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
+use zeroize::Zeroizing;
 
 pub struct Options {
     pub prompt: Option<String>,
@@ -116,6 +129,8 @@ enum Event {
     Option(String, String),
     /// Stdin is read to its end: every row is in.
     End,
+    /// A selection that was asked for with a paste, read off its pipe.
+    Paste(Zeroizing<String>),
     Script(script::Event),
 }
 
@@ -361,6 +376,7 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
     // Input starts streaming right after, so it arrives while fonts load
     // and the window maps.
     let (events, event_channel) = channel::channel();
+    let pasted = events.clone();
     let mut script = None;
     let mut secret = None;
     let mut notice = None;
@@ -444,6 +460,9 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
     let fractional_manager: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
     // Optional too: without it, launched apps open the way they always did.
     let activation = ActivationState::bind(&globals, &qh).ok();
+    // Optional as well: without them there is nothing to paste from.
+    let clipboards = DataDeviceManagerState::bind(&globals, &qh).ok();
+    let primaries = PrimarySelectionManagerState::bind(&globals, &qh).ok();
 
     // The backdrop covers the whole output, bars included, and takes the
     // keyboard. Every click outside the panel lands on it.
@@ -500,6 +519,11 @@ pub fn run(mut options: Options, input: Input, wake: Wake) -> Result<Outcome, Bo
         qh: qh.clone(),
         cursor_shapes: CursorShapeManager::bind(&globals, &qh).ok(),
         activation,
+        clipboards,
+        primaries,
+        clipboard: None,
+        primary: None,
+        pasted,
 
         layer,
         backdrop_viewport,
@@ -586,6 +610,14 @@ struct App {
     qh: QueueHandle<App>,
     cursor_shapes: Option<CursorShapeManager>,
     activation: Option<ActivationState>,
+    clipboards: Option<DataDeviceManagerState>,
+    primaries: Option<PrimarySelectionManagerState>,
+    /// The keyboard seat's clipboard and primary selection, to paste from.
+    /// sctk keeps the offer current in each; sieb only asks at a paste.
+    clipboard: Option<DataDevice>,
+    primary: Option<PrimarySelectionDevice>,
+    /// Where a selection goes once it is read: back into the event loop.
+    pasted: Sender<Event>,
 
     layer: LayerSurface,
     backdrop_viewport: WpViewport,
@@ -805,6 +837,10 @@ impl App {
             self.pick(Some(index as u8 + 2), false);
             return;
         }
+        if let Some(primary) = self.paste_key(&event) {
+            self.paste(primary);
+            return;
+        }
 
         match event.keysym {
             Keysym::Escape => self.outcome = Some(Outcome::Cancel),
@@ -866,6 +902,10 @@ impl App {
         let ctrl = self.modifiers.ctrl;
         // Held with any of these, a key is a shortcut and never text.
         let shortcut = ctrl || self.modifiers.alt || self.modifiers.logo;
+        if let Some(primary) = self.paste_key(&event) {
+            self.paste(primary);
+            return;
+        }
         let Some(secret) = &mut self.secret else {
             return;
         };
@@ -1124,6 +1164,10 @@ impl App {
                 self.land();
                 return;
             }
+            Event::Paste(text) => {
+                self.insert_pasted(&text);
+                return;
+            }
             Event::Script(event) => event,
         };
         let Some(script) = &mut self.script else {
@@ -1262,6 +1306,65 @@ impl App {
     fn move_by(&mut self, delta: i64, count: u32) {
         self.picker.move_by(delta, count);
         self.redraw();
+    }
+
+    /// Whether `event` is a paste key, and of the primary selection then:
+    /// Ctrl+V takes the clipboard, Shift+Insert what is selected, as a
+    /// terminal has it.
+    fn paste_key(&self, event: &KeyEvent) -> Option<bool> {
+        let modifiers = &self.modifiers;
+        match event.keysym {
+            Keysym::v | Keysym::V if modifiers.ctrl && !modifiers.alt => Some(false),
+            Keysym::Insert | Keysym::KP_Insert if modifiers.shift => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Asks for the clipboard, or the primary selection, to put in at the
+    /// cursor. The owner writes it to a pipe once this request reaches it,
+    /// so a thread reads it and hands it back as [`Event::Paste`]: reading
+    /// here would wait on an owner that has not been asked yet.
+    fn paste(&mut self, primary: bool) {
+        let pipe = if primary {
+            let offer = self
+                .primary
+                .as_ref()
+                .and_then(|d| d.data().selection_offer());
+            offer.and_then(|offer| {
+                let mime = offer.with_mime_types(paste::pick_mime)?;
+                offer.receive(mime).ok()
+            })
+        } else {
+            let offer = self
+                .clipboard
+                .as_ref()
+                .and_then(|d| d.data().selection_offer());
+            offer.and_then(|offer| {
+                let mime = offer.with_mime_types(paste::pick_mime)?;
+                offer.receive(mime).ok()
+            })
+        };
+        let Some(pipe) = pipe else {
+            return;
+        };
+        let pasted = self.pasted.clone();
+        std::thread::spawn(move || {
+            let _ = pasted.send(Event::Paste(paste::read(pipe)));
+        });
+    }
+
+    /// A selection asked for with [`App::paste`] has arrived.
+    fn insert_pasted(&mut self, text: &str) {
+        if self.outcome.is_some() || self.notice.is_some() {
+            return;
+        }
+        if let Some(secret) = &mut self.secret {
+            if secret.insert(paste::for_secret(text)) {
+                self.redraw();
+            }
+        } else if self.picker.insert(&paste::for_query(text)) {
+            self.query_changed();
+        }
     }
 
     /// Moves the cursor in the query, which changes neither the query nor
@@ -1543,6 +1646,60 @@ impl LayerShellHandler for App {
     }
 }
 
+// sieb only ever asks a device for its current selection, at a paste, so
+// none of what the devices report needs acting on. The rest is drag and
+// drop, which a panel that takes text from the keyboard has no use for.
+impl DataDeviceHandler for App {
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlDataDevice,
+        _: f64,
+        _: f64,
+        _: &wl_surface::WlSurface,
+    ) {
+    }
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
+
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+}
+
+impl DataOfferHandler for App {
+    fn source_actions(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+
+    fn selected_action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+}
+
+impl PrimarySelectionDeviceHandler for App {
+    fn selection(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpPrimarySelectionDeviceV1,
+    ) {
+    }
+}
+
 impl ActivationHandler for App {
     type RequestUdata = ();
 
@@ -1644,6 +1801,14 @@ impl SeatHandler for App {
     ) {
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             self.seat = Some(seat.clone());
+            // Selections belong to a seat, and are told to whoever has its
+            // keyboard: this is the seat sieb will be typed into from.
+            if self.clipboard.is_none() {
+                let clipboards = self.clipboards.as_ref();
+                self.clipboard = clipboards.map(|m| m.get_data_device(qh, &seat));
+                let primaries = self.primaries.as_ref();
+                self.primary = primaries.map(|m| m.get_selection_device(qh, &seat));
+            }
             // niri's wl_seat predates compositor-side repeat, so sctk drives
             // repeat from a calloop timer and calls back into `key`.
             self.keyboard = self
@@ -1820,6 +1985,10 @@ impl PointerHandler for App {
                     }
                 }
                 PointerEventKind::Leave { .. } => self.hovered = None,
+                // The middle button pastes what is selected, as everywhere.
+                PointerEventKind::Press {
+                    button: BTN_MIDDLE, ..
+                } => self.paste(true),
                 PointerEventKind::Press {
                     button: BTN_LEFT,
                     serial,
